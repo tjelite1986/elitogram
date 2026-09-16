@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import { getSession } from "@/lib/auth";
+import { loginUrl } from "@/lib/sso";
 import { has18Access } from "@/lib/adult-gate";
 import { getPost } from "@/lib/posts";
 import PostCard from "@/components/post-card";
@@ -18,7 +19,7 @@ export default async function PostPermalinkPage(
 ) {
   const params = await props.params;
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) redirect(loginUrl());
   const viewerId = Number(session.sub);
 
   const post = getPost(Number(params.id), viewerId);

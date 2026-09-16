@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
+import { loginUrl } from "@/lib/sso";
 import { ensureUserProfile } from "@/lib/profiles";
 import PostGrid from "@/components/post-grid";
 
@@ -13,7 +14,7 @@ export default async function PostsTagPage(
 ) {
   const params = await props.params;
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) redirect(loginUrl());
   ensureUserProfile(Number(session.sub), session.email);
   const tag = decodeURIComponent(params.tag).toLowerCase();
 

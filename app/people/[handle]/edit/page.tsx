@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import { getSession } from "@/lib/auth";
+import { loginUrl } from "@/lib/sso";
 import { ensureUserProfile, getProfileExtras } from "@/lib/profiles";
 import { has18Access } from "@/lib/adult-gate";
 import { resolvePerson } from "@/lib/directory";
@@ -18,7 +19,7 @@ export default async function EditProfilePage(
 ) {
   const params = await props.params;
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) redirect(loginUrl());
   const viewerId = Number(session.sub);
   ensureUserProfile(viewerId, session.email);
 

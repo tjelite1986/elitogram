@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
+import { loginUrl } from "@/lib/sso";
 import { ensureUserProfile } from "@/lib/profiles";
 import PostViews from "@/components/post-views";
 import PostSearch from "@/components/post-search";
@@ -12,7 +13,7 @@ export const dynamic = "force-dynamic";
 // the 18+ PIN is unlocked — the feed API enforces it).
 export default async function PostsExplorePage() {
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) redirect(loginUrl());
   const profile = ensureUserProfile(Number(session.sub), session.email);
 
   return (

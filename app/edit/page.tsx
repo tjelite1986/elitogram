@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import { getSession } from "@/lib/auth";
+import { loginUrl } from "@/lib/sso";
 import { ensureUserProfile } from "@/lib/profiles";
 import PostProfileEditor from "@/components/post-profile-editor";
 
@@ -10,7 +11,7 @@ export const dynamic = "force-dynamic";
 // Edit the viewer's shared public profile (used across the posts module).
 export default async function PostsEditProfilePage() {
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) redirect(loginUrl());
   const profile = ensureUserProfile(Number(session.sub), session.email);
 
   return (

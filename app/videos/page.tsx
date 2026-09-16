@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
+import { loginUrl } from "@/lib/sso";
 import { ensureUserProfile } from "@/lib/profiles";
 import VideosViews from "@/components/videos-views";
 
@@ -10,7 +11,7 @@ export const dynamic = "force-dynamic";
 // view as the Shorts feed.
 export default async function PostsVideosPage() {
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) redirect(loginUrl());
   ensureUserProfile(Number(session.sub), session.email);
 
   return (

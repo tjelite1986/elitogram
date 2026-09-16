@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Compass } from "lucide-react";
 import { getSession } from "@/lib/auth";
+import { loginUrl } from "@/lib/sso";
 import { ensureUserProfile } from "@/lib/profiles";
 import PostViews from "@/components/post-views";
 import StoryRail from "@/components/story-rail";
@@ -11,7 +12,7 @@ export const dynamic = "force-dynamic";
 // Home feed: posts from the people/creators the viewer follows (plus their own).
 export default async function PostsHomePage() {
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) redirect(loginUrl());
   const profile = ensureUserProfile(Number(session.sub), session.email);
 
   return (

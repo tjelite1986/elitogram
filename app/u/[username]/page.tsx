@@ -4,6 +4,7 @@ import { Pencil } from "lucide-react";
 import BioText from "@/components/bio-text";
 import { bioMentionHrefs } from "@/lib/directory";
 import { getSession } from "@/lib/auth";
+import { loginUrl } from "@/lib/sso";
 import { PostCreatorRow } from "@/lib/db";
 import { qb, getOne } from "@/lib/kysely";
 import { getProfileByUsername } from "@/lib/profiles";
@@ -39,7 +40,7 @@ export default async function PostsProfilePage(
 ) {
   const params = await props.params;
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) redirect(loginUrl());
   const viewerId = Number(session.sub);
   const username = params.username.toLowerCase();
 

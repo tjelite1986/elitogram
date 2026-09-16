@@ -1,5 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
+import { loginUrl } from "@/lib/sso";
 import { ensureUserProfile } from "@/lib/profiles";
 import { has18Access } from "@/lib/adult-gate";
 import { resolvePerson, handleOf, bioMentionHrefs } from "@/lib/directory";
@@ -17,7 +18,7 @@ export default async function PersonPage(
   const params = await props.params;
   const searchParams = await props.searchParams;
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) redirect(loginUrl());
   const viewerId = Number(session.sub);
   ensureUserProfile(viewerId, session.email);
 
