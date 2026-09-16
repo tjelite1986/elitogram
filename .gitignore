@@ -1,0 +1,10 @@
+node_modules
+.next
+data
+*.log
+# Every .env, at any depth, plus the dated backups a plain `.env` rule misses.
+.env
+.env.*
+**/.env
+**/.env.*
+tsconfig.tsbuildinfo

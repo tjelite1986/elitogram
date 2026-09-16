@@ -1,0 +1,47 @@
+{
+  "name": "elitogram",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3021",
+    "build": "next build",
+    "start": "node server.mjs",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "clsx": "^2.1.1",
+    "jose": "^5.9.6",
+    "kysely": "^0.29.3",
+    "lucide-react": "^0.577.0",
+    "next": "^15.5.25",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-markdown": "^9.1.0",
+    "remark-gfm": "^4.0.1",
+    "sharp": "^0.35.4",
+    "tailwind-merge": "^2.4.0",
+    "tailwindcss-animate": "^1.0.7",
+    "web-push": "^3.6.7",
+    "ws": "^8.21.1"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.28"
+    }
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/web-push": "^3.6.4",
+    "@types/ws": "^8.5.12",
+    "autoprefixer": "^10.5.4",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "^15.5.20",
+    "postcss": "^8.5.19",
+    "tailwindcss": "^3.4.6",
+    "typescript": "^5"
+  }
+}

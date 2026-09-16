@@ -1,0 +1,9 @@
+# The image compiles its own native modules (better-sqlite3, sharp) in the deps
+# stage; a host node_modules copied in over them by `COPY . .` would be at best
+# redundant and at worst built against a different glibc.
+node_modules
+.next
+data
+.git
+*.log
+tsconfig.tsbuildinfo

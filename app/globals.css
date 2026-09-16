@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 0 0% 3.9%;
+  /* User accent + app background (overridden per-user by the authed layout). */
+  --accent: #2563eb;
+  --app-bg: radial-gradient(circle at 50% -10%, #20202a 0%, #121212 60%);
+}
+
+.dark {
+  --background: 0 0% 3.9%;
+  --foreground: 0 0% 98%;
+}
+
+/* Remap the app's blue accent utilities to the user's accent colour. Solid
+   accent surfaces (primary buttons, active states) follow --accent; hover/text
+   variants derive from it with color-mix, so a single stored hex themes the
+   whole app. Default accent == blue, so the default look is unchanged. */
+.bg-blue-600,
+.bg-blue-500 {
+  background-color: var(--accent) !important;
+}
+.hover\:bg-blue-500:hover,
+.hover\:bg-blue-600:hover {
+  background-color: color-mix(in srgb, var(--accent), white 14%) !important;
+}
+.text-blue-300,
+.text-blue-200 {
+  color: color-mix(in srgb, var(--accent), white 42%) !important;
+}
+.ring-blue-400,
+.focus\:ring-blue-500:focus {
+  --tw-ring-color: var(--accent) !important;
+}
+.accent-blue-500 {
+  accent-color: var(--accent) !important;
+}
+
+@layer base {
+  * {
+    border-color: hsl(0 0% 89.8%);
+  }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+}
+
+/* Keyframe used by the macOS menu bar dropdown animation.
+   Kept here as a fallback in addition to the styled-jsx block inside the
+   component, so the animation works even outside that component. */
+@keyframes menuFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Privacy / screenshot blur — toggled by body classes set by PrivacyControls.tsx */
+
+body.privacy-blur-media img:not([data-no-blur]):not([data-screenshot-keep]),
+body.privacy-blur-media video:not([data-no-blur]):not([data-screenshot-keep]) {
+  filter: blur(14px);
+  transition: filter 0.15s ease;
+}
+
+body.privacy-blur-pii [data-pii] {
+  filter: blur(8px);
+  user-select: none;
+}
+
+[data-manual-blur] {
+  filter: blur(10px) !important;
+  user-select: none;
+}
+
+/* Immersive shorts ("Hide UI"): hide the global nav chrome (top menu bar,
+   Shorts/18+ tabs, category chips) for a true fullscreen. Set by shorts-feed.tsx;
+   long-pressing a clip clears it. */
+body.shorts-immersive [data-immersive-hide] {
+  display: none !important;
+}
