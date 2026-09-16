@@ -34,7 +34,7 @@ export const BADGES: BadgeDef[] = [
   {
     id: "shutterbug",
     name: "Shutterbug",
-    description: "Uploaded 50 photos.",
+    description: "Posted 50 photos.",
     icon: "Camera",
     color: "text-blue-300",
     earned: (s) => s.photos >= 50,
@@ -42,7 +42,7 @@ export const BADGES: BadgeDef[] = [
   {
     id: "archivist",
     name: "Archivist",
-    description: "Uploaded 250 photos.",
+    description: "Posted 250 photos.",
     icon: "Images",
     color: "text-cyan-300",
     earned: (s) => s.photos >= 250,
@@ -84,8 +84,13 @@ function statsFor(userId: number): Stats {
     (db.prepare(sql).get(...args) as { c: number } | undefined)?.c ?? 0;
   return {
     userId,
+    // This counted the gallery while both libraries were one app. The gallery
+    // stayed in elite-v2, so the photo badges count what this app actually
+    // holds: the images on an account's own posts.
     photos: one(
-      "SELECT COUNT(*) c FROM gallery_items WHERE user_id = ? AND is_deleted = 0",
+      `SELECT COUNT(*) c FROM post_media m
+         JOIN posts p ON p.id = m.post_id
+        WHERE p.author_user_id = ? AND p.is_deleted = 0`,
       userId
     ),
     followers: one(

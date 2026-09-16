@@ -279,6 +279,16 @@ function migrate(db: Database.Database) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Auto-earned achievement badges (definitions live in lib/badges.ts). The
+    -- table came over from elite-v2 with the profile layer but its CREATE did
+    -- not, so a person's page threw on the first resolve.
+    CREATE TABLE IF NOT EXISTS user_badges (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      badge_id TEXT NOT NULL,
+      earned_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, badge_id)
+    );
+
     -- Admin-granted per-user capabilities (keys in lib/permissions.ts). A row's
     -- presence = granted; admins need no rows.
     CREATE TABLE IF NOT EXISTS user_permissions (
