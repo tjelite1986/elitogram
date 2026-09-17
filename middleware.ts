@@ -28,6 +28,10 @@ export function middleware(request: NextRequest) {
   // Presence, not validity: the routes verify the token themselves. This only
   // decides whether the request looks like a browser's.
   if (request.headers.get("x-admin-token")) return NextResponse.next();
+  // The in-app job scheduler POSTs to its own loopback port: no browser, so no
+  // Origin and no Referer to match the host against. It presents the cron
+  // secret instead. Presence, not validity — the route checks the value.
+  if (request.headers.get("x-import-secret")) return NextResponse.next();
 
   const host = request.headers.get("host");
   const origin = request.headers.get("origin");
