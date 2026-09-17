@@ -33,6 +33,11 @@ const POSTS_ROOT = process.env.POSTS_ROOT || "/posts-store";
 const IMPORT_DIR = process.env.POSTS_IMPORT_DIR || path.join(POSTS_ROOT, "_import");
 const IMG_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"]);
 const VIDEO_EXTS = new Set([".mp4", ".mov", ".webm", ".m4v"]);
+// A GIF drop is nearly always an animated one, so it takes the video path and
+// becomes a video post rather than a still of its first frame. It cannot be
+// stream-copied into an MP4 the way a real video is, so it is encoded — see
+// processVideo().
+const ANIM_EXTS = new Set([".gif"]);
 const DISPLAY_MAX = 1440;
 const THUMB_SIZE = 600;
 
@@ -441,6 +446,19 @@ function processVideo(username, srcPath, originalName) {
 
     if (finalExt === "webm") {
       fs.copyFileSync(srcPath, finalPath);
+    } else if (ANIM_EXTS.has(ext)) {
+      // GIF has no MP4-compatible codec, so this is a real encode, not a
+      // remux. yuv420p and even dimensions are what browsers will play; a GIF
+      // is small enough that veryfast/crf 23 is not worth tuning.
+      execFileSync(
+        "ffmpeg",
+        ["-y", "-hide_banner", "-loglevel", "error", "-nostdin",
+         "-i", srcPath,
+         "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+         "-pix_fmt", "yuv420p", "-movflags", "+faststart", finalPath],
+        { stdio: "ignore" }
+      );
     } else {
       try {
         execFileSync(
@@ -580,7 +598,8 @@ async function processImage(username, srcPath, originalName) {
 async function handleFile(username, srcPath, originalName) {
   const ext = path.extname(originalName).toLowerCase();
   if (IMG_EXTS.has(ext)) await processImage(username, srcPath, originalName);
-  else if (VIDEO_EXTS.has(ext)) processVideo(username, srcPath, originalName);
+  else if (VIDEO_EXTS.has(ext) || ANIM_EXTS.has(ext))
+    processVideo(username, srcPath, originalName);
 }
 
 const entries = fs.readdirSync(IMPORT_DIR, { withFileTypes: true });
