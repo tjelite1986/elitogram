@@ -225,6 +225,14 @@ function downloadProfile(localHandle, ttUsername) {
     const ytArchive = path.join(dir, ".yt-dlp-archive.txt");
     const ytArgs = [
       url,
+      // A TikTok photo-slideshow post exposes only its background music, and
+      // the default selection saves that as an audio-only .m4a with no video
+      // in it — 500 MB of them piled up in the import folder before this was
+      // spotted. Demand a format that HAS a video stream; when none exists
+      // yt-dlp skips the entry (--ignore-errors keeps the run going) and the
+      // slideshow stays gallery-dl's job.
+      "-f",
+      "bv*+ba/bv*",
       "-o",
       path.join(dir, "%(id)s.%(ext)s"),
       "--download-archive",
