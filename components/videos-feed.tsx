@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import Link from "next/link";
 import {
   Eye,
@@ -62,6 +63,11 @@ export default function VideosFeed({
   cursorRef.current = cursor;
   const hasMoreRef = useRef(hasMore);
   hasMoreRef.current = hasMore;
+  // Backward pagination, only ever in play for a focused feed: it opens at the
+  // chosen clip, so everything newer is above it and has to be fetched.
+  const [prevCursor, setPrevCursor] = useState<number | null>(null);
+  const [hasPrev, setHasPrev] = useState(false);
+  const [loadingPrev, setLoadingPrev] = useState(false);
   const [muted, setMuted] = useState(true);
   const [chromeHidden, setChromeHidden] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
@@ -73,6 +79,7 @@ export default function VideosFeed({
   const sentinelRef = useRef<HTMLDivElement>(null);
   const focusRef = useRef(focusPostId);
   focusRef.current = focusPostId;
+  const topSentinelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setChromeHidden(localStorage.getItem("shorts:chromeHidden") === "1");
@@ -178,6 +185,12 @@ export default function VideosFeed({
         /* fall through to a normal load */
       }
     }
+    // The focused clip is the newest one the first page carries, so it is also
+    // where the walk upwards starts.
+    if (focusPostId) {
+      setPrevCursor(focusPostId);
+      setHasPrev(true);
+    }
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -203,6 +216,68 @@ export default function VideosFeed({
   }, [activeKey, restoreKey, focusPostId]);
 
   const entries = toEntries(posts);
+
+  // Backward load: the posts immediately newer than the top of the list,
+  // prepended. The prepend is committed synchronously (flushSync) and the
+  // scroll compensated right after, so nothing can scroll in between and the
+  // clip in view stays where it is.
+  const loadPrev = useCallback(async () => {
+    if (loadingPrev || !hasPrev || prevCursor === null) return;
+    // Nothing to sit above yet: the first forward page has to land, or the
+    // focused clip would end up below the clips meant to be over it.
+    if (!postsRef.current.length) return;
+    setLoadingPrev(true);
+    try {
+      const url = new URL("/api/posts/feed", window.location.origin);
+      url.searchParams.set("scope", "explore");
+      url.searchParams.set("videos", "1");
+      url.searchParams.set("limit", "12");
+      url.searchParams.set("after", String(prevCursor));
+      const res = await fetch(url.toString());
+      if (!res.ok) return;
+      const data = await res.json();
+      const root = containerRef.current;
+      // Anchor on the current topmost card and note where it sits in the
+      // viewport, so the same card can be put back there afterwards.
+      const first = root?.querySelector<HTMLElement>("[data-video-key]");
+      const anchor =
+        first && root && first.dataset.videoKey
+          ? { key: first.dataset.videoKey, delta: first.offsetTop - root.scrollTop }
+          : null;
+      flushSync(() => {
+        setPosts((prev) => {
+          const seen = new Set(prev.map((p) => p.id));
+          const fresh = (data.items as FeedPost[]).filter((i) => !seen.has(i.id));
+          return fresh.length ? [...fresh, ...prev] : prev;
+        });
+        setPrevCursor(data.nextCursor);
+        setHasPrev(data.nextCursor !== null);
+      });
+      if (anchor && root) {
+        const el = root.querySelector<HTMLElement>(
+          `[data-video-key="${anchor.key}"]`
+        );
+        // Set the position ABSOLUTELY, not by adding an offset: a snap
+        // container may already have followed its snapped card when the cards
+        // above it appeared, and a relative shift would then count twice.
+        if (el) root.scrollTop = el.offsetTop - anchor.delta;
+      }
+    } finally {
+      setLoadingPrev(false);
+    }
+  }, [hasPrev, prevCursor, loadingPrev]);
+
+  // Backward infinite scroll via a sentinel at the top of the list.
+  useEffect(() => {
+    const el = topSentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (e) => e[0].isIntersecting && loadPrev(),
+      { root: containerRef.current, rootMargin: "400px" }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [loadPrev]);
 
   // Infinite scroll via a sentinel near the end of the list.
   useEffect(() => {
@@ -268,6 +343,9 @@ export default function VideosFeed({
         ref={containerRef}
         className="h-full w-full snap-y snap-mandatory overflow-y-scroll overscroll-y-contain [overflow-anchor:none]"
       >
+        {/* overflow-anchor:none above: loadPrev compensates the scroll itself,
+            and the browser's own scroll anchoring would double the shift. */}
+        <div ref={topSentinelRef} className="h-px w-full" />
         {entries.map((entry) => (
           <div key={entry.key} data-video-key={entry.key} className="h-full w-full">
             <VideoPostCard

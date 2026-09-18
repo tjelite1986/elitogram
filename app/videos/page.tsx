@@ -19,7 +19,8 @@ export default async function PostsVideosPage(props: {
   if (!session) redirect(loginUrl());
   ensureUserProfile(Number(session.sub), session.email);
   const { focus } = await props.searchParams;
-  const focusPostId = Number(focus) > 0 ? Number(focus) : undefined;
+  const focusNum = Number(focus);
+  const focusPostId = focusNum > 0 ? focusNum : undefined;
 
   return (
     <VideosViews

@@ -35,6 +35,10 @@ export async function GET(request: Request) {
   // cursor is exclusive (id < cursor), so focus + 1 is its inclusive form.
   const focus = Number(url.searchParams.get("focus")) || 0;
   const startCursor = focus > 0 ? focus + 1 : cursor ? Number(cursor) : null;
+  // `after` walks the other way — the posts immediately newer than this id —
+  // so a feed opened at a focused clip can also be scrolled back up. It
+  // replaces the cursor rather than combining with it.
+  const after = Number(url.searchParams.get("after")) || 0;
 
   let scope: FeedScope;
   switch (kind) {
@@ -79,10 +83,11 @@ export async function GET(request: Request) {
   const { items, nextCursor } = getFeed(
     scope,
     viewerId,
-    startCursor,
+    after > 0 ? null : startCursor,
     limit,
     includeAdult,
-    url.searchParams.get("videos") === "1"
+    url.searchParams.get("videos") === "1",
+    after > 0 ? after : null
   );
 
   return NextResponse.json({ items, nextCursor });

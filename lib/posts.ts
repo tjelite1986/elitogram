@@ -149,12 +149,19 @@ export function getFeed(
   cursor: number | null,
   limit = 12,
   includeAdult = false,
-  videosOnly = false
+  videosOnly = false,
+  // Backward pagination: the posts immediately NEWER than this id, for a feed
+  // opened part-way down (?focus=) that has to be able to scroll back up.
+  // Mutually exclusive with `cursor`, which walks the other way.
+  after: number | null = null
 ): { items: FeedPost[]; nextCursor: number | null } {
   let q = postBase(viewerId).where("p.is_deleted", "=", 0);
 
   if (!includeAdult) q = q.where("p.is_adult", "=", 0);
   if (cursor) q = q.where("p.id", "<", cursor);
+  // Ascending below, so this picks the ids immediately above `after` rather
+  // than the newest overall; the page is flipped back to newest-first at the end.
+  if (after !== null) q = q.where("p.id", ">", after);
   if (videosOnly) {
     q = q.where(
       "p.id",
@@ -233,14 +240,19 @@ export function getFeed(
   }
 
   const rows = getAll<PostQueryRow>(
-    q.orderBy("p.id", "desc").limit(limit + 1)
+    q.orderBy("p.id", after !== null ? "asc" : "desc").limit(limit + 1)
   );
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
+  // The id to continue from is the last row of the page in QUERY order: the
+  // oldest id going forward, the newest going backward. Read it before the
+  // backward page is flipped to newest-first for rendering.
+  const pageEndId = page.length ? page[page.length - 1].id : null;
+  if (after !== null) page.reverse();
   return {
     items: attachMedia(page),
-    nextCursor: hasMore ? page[page.length - 1].id : null,
+    nextCursor: hasMore ? pageEndId : null,
   };
 }
 
