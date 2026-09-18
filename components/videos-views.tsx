@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { LayoutGrid, Rows3 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import PostGrid from "@/components/post-grid";
@@ -13,15 +14,24 @@ type View = "feed" | "grid";
 // plays video media). Both scope to video posts and share position restoration.
 // The chosen view is remembered per surface; navigating into a clip's profile
 // and back restores the view (localStorage) and the position (sessionStorage).
+//
+// Tapping a video tile in the grid does NOT open the lightbox — it links to
+// ?focus=<post>, which forces the immersive feed to open at that clip. The
+// lightbox sizes a video to its own pixels, which leaves a low-resolution
+// upload as a small rectangle on a phone; the feed fills the screen. The
+// remembered view is untouched by a focus, so Back returns to the grid.
 export default function VideosViews({
   viewer,
   storageKey,
   restoreKey,
+  focusPostId,
 }: {
   viewer: { userId: number; isAdmin: boolean };
   storageKey: string;
   restoreKey?: string;
+  focusPostId?: number;
 }) {
+  const router = useRouter();
   const [view, setView] = useState<View>("feed");
   const [ready, setReady] = useState(false);
 
@@ -49,7 +59,7 @@ export default function VideosViews({
 
   if (!ready) return null;
 
-  if (view === "grid") {
+  if (view === "grid" && !focusPostId) {
     return (
       <div className="w-full pb-24 pt-2 text-white">
         <div className="mb-1 flex justify-end px-2">
@@ -75,6 +85,7 @@ export default function VideosViews({
             empty="No videos yet."
             viewer={viewer}
             restoreKey={restoreKey ? `${restoreKey}:grid` : undefined}
+            onOpenVideo={(id) => router.push(`/videos?focus=${id}`)}
           />
         </div>
       </div>
@@ -86,10 +97,15 @@ export default function VideosViews({
       <VideosFeed
         viewer={viewer}
         restoreKey={restoreKey ? `${restoreKey}:feed` : undefined}
+        focusPostId={focusPostId}
       />
-      {/* Switch to the grid — top-left, clear of the feed's own controls. */}
+      {/* Switch to the grid — top-left, clear of the feed's own controls. A
+          focus lives in the URL, so it has to be dropped as well. */}
       <button
-        onClick={() => pick("grid")}
+        onClick={() => {
+          pick("grid");
+          if (focusPostId) router.replace("/videos");
+        }}
         aria-label="Grid view"
         className={cn(controlBtn, "absolute left-2 top-2 z-40")}
       >

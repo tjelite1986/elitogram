@@ -20,6 +20,7 @@ export default function PostGrid({
   query,
   empty = "No posts yet.",
   onSelect,
+  onOpenVideo,
   select,
   reloadKey = 0,
   viewer,
@@ -34,6 +35,10 @@ export default function PostGrid({
   // Selection mode: when set, a tile calls onSelect(firstMediaId) instead of
   // linking to the post (used to pick a profile picture from the real feed).
   onSelect?: (mediaId: number) => void;
+  // When set, tapping a tile whose post carries video opens that post here
+  // instead of in the lightbox — the Videos tab passes the immersive feed, so a
+  // clip plays fullscreen rather than at its own (often small) pixel size.
+  onOpenVideo?: (postId: number) => void;
   // Post-selection mode (combine into stack): when active, a tile toggles the
   // post id in the selection set instead of navigating.
   select?: {
@@ -353,7 +358,16 @@ export default function PostGrid({
             <button
               key={p.id}
               data-post-id={p.id}
-              onClick={() => openPost(p.id, 0)}
+              onClick={() => {
+                if (onOpenVideo && p.media.some((m) => m.is_video)) {
+                  // Leaving the page: keep the tiles and the scroll position
+                  // so coming back lands on this clip, not at the top.
+                  saveCache();
+                  onOpenVideo(p.id);
+                } else {
+                  openPost(p.id, 0);
+                }
+              }}
               className={cls}
               style={tileStyle}
             >

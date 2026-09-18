@@ -37,12 +37,18 @@ function toEntries(posts: FeedPost[]): VideoEntry[] {
 export default function VideosFeed({
   viewer,
   restoreKey,
+  focusPostId,
 }: {
   viewer: { userId: number; isAdmin: boolean };
   // When set, the loaded posts + scroll position are cached (sessionStorage) so
   // returning after visiting a video's profile lands on the same clip instead of
   // the top.
   restoreKey?: string;
+  // Start the feed at this post rather than at the newest one — a clip tapped
+  // in the grid view. It takes precedence over the restored position, and the
+  // position cache is left alone while a focus is in force so a later visit
+  // without one still opens where the viewer last was.
+  focusPostId?: number;
 }) {
   const [posts, setPosts] = useState<FeedPost[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
@@ -65,6 +71,8 @@ export default function VideosFeed({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const focusRef = useRef(focusPostId);
+  focusRef.current = focusPostId;
 
   useEffect(() => {
     setChromeHidden(localStorage.getItem("shorts:chromeHidden") === "1");
@@ -124,6 +132,9 @@ export default function VideosFeed({
       url.searchParams.set("videos", "1");
       url.searchParams.set("limit", "12");
       if (cursor) url.searchParams.set("cursor", String(cursor));
+      // Only the first page: once a cursor exists the feed is walking forward
+      // from the focused clip on its own.
+      else if (focusRef.current) url.searchParams.set("focus", String(focusRef.current));
       const res = await fetch(url.toString());
       if (res.ok) {
         const data = await res.json();
@@ -141,7 +152,7 @@ export default function VideosFeed({
 
   // Restore cached posts + scroll on mount, else initial load.
   useEffect(() => {
-    if (restoreKey) {
+    if (restoreKey && !focusPostId) {
       try {
         const raw = sessionStorage.getItem("vf:" + restoreKey);
         if (raw) {
@@ -174,7 +185,7 @@ export default function VideosFeed({
   // Persist posts + container scroll each time the clip in view changes, so a
   // navigation away (into a profile) has an up-to-date position to return to.
   useEffect(() => {
-    if (!restoreKey || !activeKey) return;
+    if (!restoreKey || !activeKey || focusPostId) return;
     try {
       sessionStorage.setItem(
         "vf:" + restoreKey,
@@ -189,7 +200,7 @@ export default function VideosFeed({
     } catch {
       /* quota / private mode */
     }
-  }, [activeKey, restoreKey]);
+  }, [activeKey, restoreKey, focusPostId]);
 
   const entries = toEntries(posts);
 

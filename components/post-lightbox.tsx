@@ -258,7 +258,12 @@ export default function PostLightbox({
               autoPlay
               playsInline
               onClick={(e) => e.stopPropagation()}
-              className="max-h-full max-w-full object-contain"
+              // Fills the overlay rather than capping at the file's own pixel
+              // size: a low-resolution clip would otherwise sit as a small
+              // rectangle in the middle of the screen. object-contain keeps the
+              // aspect ratio, so nothing is cropped. A photo still caps (below)
+              // — upscaling a picture only makes it soft.
+              className="h-full w-full object-contain"
             />
           ) : (
             // eslint-disable-next-line @next/next/no-img-element

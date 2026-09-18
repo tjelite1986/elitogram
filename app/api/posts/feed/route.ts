@@ -30,6 +30,11 @@ export async function GET(request: Request) {
   const kind = url.searchParams.get("scope") || "home";
   const cursor = url.searchParams.get("cursor");
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 12, 1), 40);
+  // `focus` opens the feed AT a post instead of after one, so the Videos grid
+  // can hand a tapped clip to the immersive feed. Post ids are integers and the
+  // cursor is exclusive (id < cursor), so focus + 1 is its inclusive form.
+  const focus = Number(url.searchParams.get("focus")) || 0;
+  const startCursor = focus > 0 ? focus + 1 : cursor ? Number(cursor) : null;
 
   let scope: FeedScope;
   switch (kind) {
@@ -74,7 +79,7 @@ export async function GET(request: Request) {
   const { items, nextCursor } = getFeed(
     scope,
     viewerId,
-    cursor ? Number(cursor) : null,
+    startCursor,
     limit,
     includeAdult,
     url.searchParams.get("videos") === "1"
