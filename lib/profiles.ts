@@ -1,5 +1,5 @@
 import { db, UserProfileRow } from "./db";
-import { qb, getOne } from "./kysely";
+import { qb, getOne, getAll } from "./kysely";
 import { safeHttpUrl } from "./url";
 
 // Shared public-profile layer (username/avatar/bio), 1:1 with users. The posts
@@ -138,6 +138,18 @@ export function getHandleAvatar(handle: string): string | null {
       .where("handle", "=", handle)
   );
   return row?.avatar_key ?? null;
+}
+
+// Every handle that has a chosen avatar, in one read of a table with a row per
+// picture. A list — the people directory, a page of the feed — answers "does
+// this one have an avatar?" from this set instead of a query per row, and the
+// client uses the answer to not request the ones that would 404.
+export function handlesWithAvatar(): Set<string> {
+  return new Set(
+    getAll<{ handle: string }>(qb.selectFrom("handle_avatars").select("handle")).map(
+      (r) => r.handle
+    )
+  );
 }
 
 // Cross-section profile extras (bio / banner / labeled links), keyed by handle.

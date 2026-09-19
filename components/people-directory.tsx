@@ -358,7 +358,7 @@ function PersonRow({ person: p }: { person: PersonEntry }) {
   return (
     <div className="flex items-center gap-3 rounded-2xl bg-white/5 p-2.5">
       <Link href={`/people/${p.handle}`}>
-        <PostAvatar username={p.handle} size={48} />
+        <PostAvatar username={p.handle} size={48} hasAvatar={p.hasAvatar} />
       </Link>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">

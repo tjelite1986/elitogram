@@ -1,6 +1,8 @@
 import { sql } from "kysely";
 import { PostRow } from "./db";
 import { qb, getOne, getAll } from "./kysely";
+import { handlesWithAvatar } from "./profiles";
+import { handleOf } from "./directory";
 
 // Query layer for the posts module. Author of a post is a real user OR a
 // mirrored creator; every query resolves a unified author shape by joining both
@@ -13,7 +15,10 @@ export interface FeedAuthor {
   id: number; // user_id or creator id
   username: string | null;
   display_name: string | null;
-  avatar_key: string | null;
+  // Whether an avatar exists at all — the handle-scoped one or a legacy column.
+  // The client needs the yes/no, not the key: it asks the avatar route for the
+  // picture, and only when the answer here is yes.
+  has_avatar: boolean;
 }
 
 export interface FeedPostMedia {
@@ -113,6 +118,11 @@ function attachMedia(rows: PostQueryRow[]): FeedPost[] {
       is_video: m.mime_type.startsWith("video/"),
     });
   }
+  // One read for the page, not one per row: the handle-scoped avatars win over
+  // the legacy per-table columns the query coalesced, so a picture chosen for a
+  // creator that has no post_creators.avatar_key still counts as present.
+  const avatarHandles = handlesWithAvatar();
+
   return rows.map((r) => ({
     id: r.id,
     caption: r.caption,
@@ -123,7 +133,10 @@ function attachMedia(rows: PostQueryRow[]): FeedPost[] {
       id: r.author_id,
       username: r.author_username,
       display_name: r.author_display_name,
-      avatar_key: r.author_avatar_key,
+      has_avatar: Boolean(
+        r.author_avatar_key ||
+          (r.author_username && avatarHandles.has(handleOf(r.author_username)))
+      ),
     },
     media: byPost.get(r.id) ?? [],
     like_count: Number(r.like_count),

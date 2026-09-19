@@ -337,7 +337,7 @@ export default function PostLightbox({
             href={`/people/${post.author.username ?? "unknown"}`}
             className="mb-1.5 flex items-center gap-2.5"
           >
-            <PostAvatar username={post.author.username} size={32} />
+            <PostAvatar username={post.author.username} size={32} hasAvatar={post.author.has_avatar} />
             <span className="truncate text-sm font-semibold text-white">
               {post.author.display_name || post.author.username || "unknown"}
             </span>

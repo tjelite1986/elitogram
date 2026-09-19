@@ -1,7 +1,7 @@
 import { sql } from "kysely";
 import { db } from "./db";
 import { qb, getOne, getAll } from "./kysely";
-import { getProfileExtras, ProfileLink, ProfileField } from "./profiles";
+import { getProfileExtras, handlesWithAvatar, ProfileLink, ProfileField } from "./profiles";
 import { resolveBadges } from "./badges";
 import { getPrimaryHandle, personContentIds, getGroupMembers } from "./profile-links";
 
@@ -317,11 +317,7 @@ export function getPeople(
   // Handles that have a chosen avatar (handle_avatars takes precedence over the
   // legacy per-table avatar_key columns). Loaded once so "no avatar" sorting and
   // the hasAvatar flag don't need a per-person query.
-  const avatarHandles = new Set(
-    getAll<{ handle: string }>(qb.selectFrom("handle_avatars").select("handle")).map(
-      (r) => r.handle
-    )
-  );
+  const avatarHandles = handlesWithAvatar();
 
   // Linked social accounts (Instagram / TikTok) live on profile_extras, keyed by
   // the same lowercased handle. Loaded once so the has/missing sorts don't need a

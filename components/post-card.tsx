@@ -144,7 +144,7 @@ export default function PostCard({
           with one, the post's source link. */}
       <header className="flex items-center gap-2.5 px-3 py-2.5">
         <Link href={`/people/${handle}`}>
-          <PostAvatar username={post.author.username} size={34} />
+          <PostAvatar username={post.author.username} size={34} hasAvatar={post.author.has_avatar} />
         </Link>
         <div className="min-w-0 flex-1">
           <Link
