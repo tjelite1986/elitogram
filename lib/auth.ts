@@ -1,7 +1,7 @@
 import { cookies, headers } from "next/headers";
 import { db, type UserRow } from "./db";
 import { qb, getOne } from "./kysely";
-import { SESSION_COOKIE, verifyToken, type Appearance } from "./sso";
+import { SESSION_COOKIE, verifyToken, VERIFY_TTL_MS, type Appearance } from "./sso";
 
 /**
  * The session shape the rest of the app reads.
@@ -21,11 +21,24 @@ export interface Session {
 }
 
 /**
+ * When each mirrored account was last written. In-process only, like the verify
+ * cache it is pegged to.
+ */
+const mirroredAt = new Map<number, number>();
+
+/**
  * Mirror the account elite-v2 just vouched for.
  *
  * The row is what lets a like or a comment render a name without a second round
- * trip, and it is refreshed on every verify rather than written once: a rename
- * over there has to reach the posts filed under the old name.
+ * trip, and it is refreshed rather than written once: a rename over there has to
+ * reach the posts filed under the old name.
+ *
+ * It is NOT refreshed on every call. getSession() runs ~100 times per page view
+ * — once per server component, once per media byte served — and this wrote the
+ * same unchanged row every time: a hundred serialized SQLite write transactions
+ * per page, contending with the job scheduler on the same file. The row can
+ * never be fresher than the verify that feeds it, so it is refreshed on that
+ * same window (VERIFY_TTL_MS) and skipped in between.
  *
  * `adult_pin_hash` is deliberately absent from the UPDATE. The PIN gates
  * surfaces on THIS host and is set on this host, so a mirror refresh must never
@@ -41,17 +54,16 @@ function mirrorUser(user: {
   displayName?: string | null;
   avatarUrl?: string | null;
 }): void {
-  db.prepare(
-    `INSERT INTO users (id, email, role, username, display_name, avatar_url, synced_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-     ON CONFLICT(id) DO UPDATE SET
-       email = excluded.email,
-       role = excluded.role,
-       username = COALESCE(excluded.username, users.username),
-       display_name = COALESCE(excluded.display_name, users.display_name),
-       avatar_url = excluded.avatar_url,
-       synced_at = excluded.synced_at`
-  ).run(
+  const now = Date.now();
+  const last = mirroredAt.get(user.id);
+  if (last !== undefined && now - last < VERIFY_TTL_MS) return;
+  // Stamp before the write, not after: a throw must not turn every subsequent
+  // request into another attempt at the same failing statement.
+  mirroredAt.set(user.id, now);
+  for (const [id, at] of mirroredAt) {
+    if (now - at >= VERIFY_TTL_MS) mirroredAt.delete(id);
+  }
+  mirrorStatement().run(
     user.id,
     user.email,
     user.role,
@@ -59,6 +71,29 @@ function mirrorUser(user: {
     user.displayName ?? null,
     user.avatarUrl ?? null
   );
+}
+
+/**
+ * Prepared once and reused. db.prepare() re-parses the statement on every call,
+ * which is the other half of what made the mirror expensive.
+ */
+type MirrorBind = [number, string, string, string | null, string | null, string | null];
+let mirrorStmt: ReturnType<typeof db.prepare<MirrorBind>> | null = null;
+function mirrorStatement() {
+  if (!mirrorStmt) {
+    mirrorStmt = db.prepare<MirrorBind>(
+      `INSERT INTO users (id, email, role, username, display_name, avatar_url, synced_at)
+       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET
+         email = excluded.email,
+         role = excluded.role,
+         username = COALESCE(excluded.username, users.username),
+         display_name = COALESCE(excluded.display_name, users.display_name),
+         avatar_url = excluded.avatar_url,
+         synced_at = excluded.synced_at`
+    );
+  }
+  return mirrorStmt;
 }
 
 /**

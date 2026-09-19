@@ -16,7 +16,13 @@
  * times asks once and revocation lags by at most that.
  */
 export const SESSION_COOKIE = "elite_session";
-const TTL_MS = 30_000;
+/**
+ * How long a verified token is trusted without another round trip. Exported
+ * because the mirror in lib/auth.ts pegs its own refresh to the same window:
+ * the mirrored row can never be fresher than the verify that feeds it.
+ */
+export const VERIFY_TTL_MS = 30_000;
+const TTL_MS = VERIFY_TTL_MS;
 const TIMEOUT_MS = 5_000;
 
 export interface EliteUser {
