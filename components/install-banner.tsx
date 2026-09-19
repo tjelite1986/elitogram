@@ -7,7 +7,9 @@ type BeforeInstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 };
 
-const DISMISS_KEY = "adshortis.installDismissed";
+// Renamed off the adshortis key this app was forked from: a dismissal stored
+// under the old one was a dismissal of a banner offering the wrong app.
+const DISMISS_KEY = "elitogram.installDismissed";
 
 // Install banner. Chrome only volunteers its own install prompt after opaque
 // engagement heuristics, which leaves the install path buried in the three-dot
@@ -68,7 +70,7 @@ export default function InstallBanner() {
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src="/icon-192.png" alt="" className="h-10 w-10 rounded-xl" />
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-semibold text-white">Install Adshortis</div>
+        <div className="text-sm font-semibold text-white">Install Elitogram</div>
         <div className="text-xs text-white/60">
           Get the app on your home screen
         </div>
