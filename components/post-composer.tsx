@@ -68,7 +68,13 @@ export default function PostComposer({ canFlagAdult }: { canFlagAdult: boolean }
         accept="*/*"
         multiple
         hidden
-        onChange={(e) => addFiles(e.target.files)}
+        onChange={(e) => {
+          addFiles(e.target.files);
+          // Clear the input so removing a file and re-picking the SAME one
+          // still fires a change event. Without this the browser sees an
+          // unchanged value and does nothing, which reads as a dead button.
+          e.target.value = "";
+        }}
       />
 
       {picked.length === 0 ? (

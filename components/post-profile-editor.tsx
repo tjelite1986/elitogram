@@ -69,7 +69,12 @@ export default function PostProfileEditor({ initial }: { initial: Profile }) {
           type="file"
           accept="*/*"
           hidden
-          onChange={(e) => e.target.files?.[0] && uploadAvatar(e.target.files[0])}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) uploadAvatar(f);
+            // Re-picking the same file after a failed upload has to work.
+            e.target.value = "";
+          }}
         />
         <button
           onClick={() => fileRef.current?.click()}

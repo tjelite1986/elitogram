@@ -278,7 +278,13 @@ export default function ProfileExtrasEditor({
           type="file"
           accept="*/*"
           hidden
-          onChange={(e) => e.target.files?.[0] && uploadBanner(e.target.files[0])}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) uploadBanner(f);
+            // Re-uploading a corrected banner has to work without picking a
+            // different file first.
+            e.target.value = "";
+          }}
         />
         <button
           onClick={() => fileRef.current?.click()}

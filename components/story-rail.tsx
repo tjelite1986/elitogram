@@ -55,7 +55,12 @@ export default function StoryRail({ myUsername }: { myUsername: string }) {
         type="file"
         accept="*/*"
         hidden
-        onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) upload(f);
+          // Re-posting the same story image has to work.
+          e.target.value = "";
+        }}
       />
       <div className="mb-3 flex gap-3 overflow-x-auto px-3 py-2" style={{ scrollbarWidth: "none" }}>
         {/* My story */}
