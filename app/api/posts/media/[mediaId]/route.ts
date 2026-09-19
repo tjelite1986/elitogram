@@ -63,15 +63,48 @@ export async function GET(request: Request, props: { params: Promise<{ mediaId: 
     .replace(/[^\x20-\x7E]/g, "")
     .replace(/"/g, "");
 
-  const size = fs.statSync(filePath).size;
+  const stat = fs.statSync(filePath);
+  const size = stat.size;
+  // A media id is never reused and the bytes behind one are never replaced —
+  // reassigning a post only moves the file (author/route.ts:80) — so the
+  // id/version/size triple names exactly one byte sequence and can be
+  // revalidated. Without this a lapsed max-age re-downloads the whole file:
+  // ~510 KB for a first Explore screenful, where a 304 costs a few hundred
+  // bytes. Adult media keeps the short window so locking the 18+ gate takes
+  // effect within a day rather than a week.
+  const etag = `"m${media.id}-${media.media_version}-${sizeParam ?? "full"}"`;
   const headers: Record<string, string> = {
     "Content-Type": mediaMimeFor(key),
     "X-Content-Type-Options": "nosniff",
     "Content-Disposition": wantDownload
       ? `attachment; filename="${dlName || `media-${media.id}`}"`
       : "inline",
-    "Cache-Control": "private, max-age=86400",
+    "Cache-Control": post.is_adult ? "private, max-age=86400" : "private, max-age=604800",
+    ETag: etag,
+    "Last-Modified": new Date(stat.mtimeMs).toUTCString(),
   };
+  // The service worker serves its cached copy before it revalidates, so a thumb
+  // it stored while the 18+ gate was open would keep rendering after the gate
+  // was locked again. It cannot know which post a URL belongs to; this header
+  // is how it is told not to store one. The browser's own HTTP cache still
+  // holds it for the max-age above, as it always has.
+  if (post.is_adult) headers["X-Adult-Media"] = "1";
+
+  // Answer a conditional request before the Range branch: a 304 carries no
+  // body and must never become a 206. If-None-Match wins over
+  // If-Modified-Since when both are sent (RFC 9110 13.1.3), and the
+  // modified-since comparison truncates to whole seconds because that is all
+  // the header carries.
+  const ifNoneMatch = request.headers.get("if-none-match");
+  const ifModifiedSince = request.headers.get("if-modified-since");
+  const notModified = ifNoneMatch
+    ? ifNoneMatch.split(",").some((t) => t.trim() === etag || t.trim() === `W/${etag}`)
+    : ifModifiedSince
+      ? Date.parse(ifModifiedSince) >= Math.floor(stat.mtimeMs / 1000) * 1000
+      : false;
+  if (notModified) {
+    return new NextResponse(null, { status: 304, headers });
+  }
 
   // Range support for video playback (Safari refuses to play without it).
   if (!wantThumb && isVideoKey(media.storage_key)) {
