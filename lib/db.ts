@@ -95,9 +95,16 @@ function migrate(db: Database.Database) {
       is_deleted INTEGER NOT NULL DEFAULT 0,
       CHECK ((author_user_id IS NULL) <> (author_creator_id IS NULL))
     );
-    CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(is_deleted, created_at);
-    CREATE INDEX IF NOT EXISTS idx_posts_author_user ON posts(author_user_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_posts_author_creator ON posts(author_creator_id, created_at);
+    -- Every feed orders by p.id, never by created_at, so these three carry the
+    -- id as their last column: the planner then walks the index backwards and
+    -- a page costs a page. Ordering by created_at instead made each scroll page
+    -- sort the whole 45k-row table in a temp B-tree (12 ms of blocked event
+    -- loop per page). The three belong together — adding only the feed index
+    -- makes it look cheap enough to steal the profile queries and lose THEIR
+    -- sort instead. See the reshape in migrate() for existing databases.
+    CREATE INDEX IF NOT EXISTS idx_posts_feed ON posts(is_deleted, is_adult, id);
+    CREATE INDEX IF NOT EXISTS idx_posts_author_user ON posts(author_user_id, is_deleted, id);
+    CREATE INDEX IF NOT EXISTS idx_posts_author_creator ON posts(author_creator_id, is_deleted, id);
 
     -- Carousel media for a post, ordered by position. media_version busts the
     -- by-id media URL cache after a re-crop.
@@ -351,6 +358,40 @@ function migrate(db: Database.Database) {
   addColumn("post_media", "content_hash", "TEXT");
   addColumn("user_profiles", "show_adult_outside", "INTEGER NOT NULL DEFAULT 0");
   addColumn("users", "adult_pin_hash", "TEXT");
+
+  // CREATE INDEX IF NOT EXISTS above leaves an index that already exists under
+  // its OLD definition alone, so a database created before the posts indexes
+  // were reshaped keeps sorting every feed page. Recreate any whose stored
+  // definition no longer matches, comparing with whitespace collapsed so
+  // formatting alone never triggers a rebuild.
+  const reshapeIndex = (name: string, ddl: string) => {
+    const flat = (t: string) => t.replace(/\s+/g, " ").trim();
+    try {
+      const row = db
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
+        .get(name) as { sql: string | null } | undefined;
+      if (row && row.sql && flat(row.sql) === flat(ddl)) return;
+      if (row) db.exec(`DROP INDEX ${name}`);
+      db.exec(ddl);
+    } catch {
+      /* raced with another worker that just reshaped it */
+    }
+  };
+  reshapeIndex("idx_posts_feed", "CREATE INDEX idx_posts_feed ON posts(is_deleted, is_adult, id)");
+  reshapeIndex(
+    "idx_posts_author_user",
+    "CREATE INDEX idx_posts_author_user ON posts(author_user_id, is_deleted, id)"
+  );
+  reshapeIndex(
+    "idx_posts_author_creator",
+    "CREATE INDEX idx_posts_author_creator ON posts(author_creator_id, is_deleted, id)"
+  );
+  // Superseded by idx_posts_feed: nothing filters or orders by posts.created_at.
+  try {
+    db.exec("DROP INDEX IF EXISTS idx_posts_created");
+  } catch {
+    /* another worker got there first */
+  }
 
   // Caption search. Guarded because FTS5 is a compile-time option: without it
   // the search route falls back to LIKE, which is correct, only slower.
