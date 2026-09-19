@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
-import { Readable } from "node:stream";
 import { PostMediaRow, PostRow } from "@/lib/db";
+import { fileStream } from "@/lib/file-stream";
 import { qb, getOne } from "@/lib/kysely";
 import { getSession } from "@/lib/auth";
 import { has18Access } from "@/lib/adult-gate";
@@ -97,8 +97,7 @@ export async function GET(request: Request, props: { params: Promise<{ mediaId: 
           headers: { "Content-Range": `bytes */${size}` },
         });
       }
-      const stream = fs.createReadStream(filePath, { start, end });
-      return new NextResponse(Readable.toWeb(stream) as unknown as ReadableStream, {
+      return new NextResponse(fileStream(filePath, { start, end }, request.signal), {
         status: 206,
         headers: {
           ...headers,
@@ -111,8 +110,7 @@ export async function GET(request: Request, props: { params: Promise<{ mediaId: 
 
   // Stream from disk instead of buffering the whole file into memory (matches
   // the gallery media route); avoids RAM spikes on large uploads.
-  const stream = fs.createReadStream(filePath);
-  return new NextResponse(Readable.toWeb(stream) as unknown as ReadableStream, {
+  return new NextResponse(fileStream(filePath, {}, request.signal), {
     status: 200,
     headers: { ...headers, "Content-Length": String(size) },
   });

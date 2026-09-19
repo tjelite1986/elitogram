@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
-import { Readable } from "node:stream";
+import { fileStream } from "@/lib/file-stream";
 import { getSession } from "@/lib/auth";
 import { isFollowing } from "@/lib/posts";
 import { getStory, adultAuthorId } from "@/lib/stories";
@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 
 // Stream a story image. Viewable by the author or someone who follows them — the
 // same scope as the rail, re-checked here rather than assumed.
-export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
+export async function GET(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
   const session = await getSession();
   if (!session) return new NextResponse("Unauthorized", { status: 401 });
@@ -42,8 +42,7 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
   const filePath = mediaPathFor(story.storage_key);
   if (!fs.existsSync(filePath)) return new NextResponse("Not found", { status: 404 });
 
-  const stream = fs.createReadStream(filePath);
-  return new NextResponse(Readable.toWeb(stream) as unknown as ReadableStream, {
+  return new NextResponse(fileStream(filePath, {}, request.signal), {
     headers: {
       "Content-Type": imageMimeFor(story.storage_key),
       "Content-Length": String(fs.statSync(filePath).size),
