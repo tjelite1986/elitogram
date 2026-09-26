@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Heart,
@@ -18,6 +18,7 @@ import {
   Pencil,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { SOURCE_RE, sourceLabel } from "@/lib/caption-source";
 import { useBackDismiss } from "@/lib/use-back-dismiss";
 import { CommentsSheet } from "@/components/post-card";
 import EditCaptionSheet from "@/components/edit-caption-sheet";
@@ -81,7 +82,6 @@ export default function VideoPostCard({
   onToggleChrome,
   onToggleFullscreen,
   onRemoved,
-  onMediaRemoved,
   onPatch,
 }: {
   post: FeedPost;
@@ -97,7 +97,6 @@ export default function VideoPostCard({
   // The whole post left the feed (deleted / emptied by a move).
   onRemoved?: (postId: number) => void;
   // Only this video left the post (siblings remain).
-  onMediaRemoved?: (postId: number, mediaId: number) => void;
   // Like/comment-count changes, so sibling cards of the same post stay in sync.
   onPatch?: (postId: number, patch: Partial<FeedPost>) => void;
 }) {
@@ -114,6 +113,23 @@ export default function VideoPostCard({
   const [likeCount, setLikeCount] = useState(post.like_count);
   const [commentCount, setCommentCount] = useState(post.comment_count);
   const [caption, setCaption] = useState(post.caption);
+  // The clip's intrinsic dimensions, read from loadedmetadata — they size the
+  // overlay-anchoring box around the video.
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
+  // The "Source: <url>" credit line the importer appends — lifted out of the
+  // caption and shown as a small link, like the photo feed does. Derived from
+  // the caption STATE (not the prop) so an edit re-derives it.
+  const sourceUrl = useMemo(
+    () => caption?.match(SOURCE_RE)?.[1] ?? null,
+    [caption]
+  );
+  const displayCaption = useMemo(
+    () =>
+      sourceUrl && caption
+        ? caption.replace(SOURCE_RE, " ").replace(/\n{3,}/g, "\n\n").trim()
+        : caption,
+    [caption, sourceUrl]
+  );
   const [burst, setBurst] = useState(false);
   const [showComments, setShowComments] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
@@ -296,6 +312,15 @@ export default function VideoPostCard({
 
   return (
     <section className="relative flex h-full w-full snap-start snap-always items-center justify-center bg-black">
+      {/* The clip box: sized to the video's own aspect ratio (height is the
+          card, width follows, capped at the screen). Every overlay anchors to
+          THIS box, so on a wide screen the caption and the action rail hug the
+          clip instead of sitting half a screen away on plain black. On a phone
+          the cap makes it the full width it always was. */}
+      <div
+        className="relative h-full max-w-full"
+        style={{ aspectRatio: dims ? `${dims.w} / ${dims.h}` : "9 / 16" }}
+      >
       <video
         ref={videoRef}
         src={`/api/posts/media/${media.id}`}
@@ -313,7 +338,13 @@ export default function VideoPostCard({
         onPointerLeave={cancelLongPress}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
-        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+        onLoadedMetadata={(e) => {
+          setDuration(e.currentTarget.duration || 0);
+          const { videoWidth, videoHeight } = e.currentTarget;
+          if (videoWidth > 0 && videoHeight > 0) {
+            setDims({ w: videoWidth, h: videoHeight });
+          }
+        }}
         onTimeUpdate={(e) => {
           const v = e.currentTarget;
           if (v.duration) setProgress((v.currentTime / v.duration) * 100);
@@ -499,13 +530,25 @@ export default function VideoPostCard({
           >
             @{post.author.display_name || handle}
           </Link>
-          {caption && (
+          {sourceUrl && (
+            <a
+              href={sourceUrl}
+              target="_blank"
+              rel="noreferrer noopener"
+              onClick={(e) => e.stopPropagation()}
+              className="block truncate text-xs text-white/70 drop-shadow transition active:scale-95"
+            >
+              {sourceLabel(sourceUrl)}
+            </a>
+          )}
+          {displayCaption && (
             <p className="mt-1 line-clamp-3 text-sm drop-shadow">
-              {renderCaption(caption)}
+              {renderCaption(displayCaption)}
             </p>
           )}
         </div>
       )}
+      </div>
 
       {showEdit && (
         <EditCaptionSheet

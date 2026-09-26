@@ -265,7 +265,13 @@ export default function VideosFeed({
     } finally {
       setLoadingPrev(false);
     }
-  }, [hasPrev, prevCursor, loadingPrev]);
+    // posts.length === 0 is a real input: the early return above bails while
+    // the first forward page is in flight, and the sentinel sits continuously
+    // intersecting so the observer never fires again on its own. Including it
+    // rebuilds the observer (via the effect below) once the first page lands,
+    // which re-delivers the initial intersection and starts the backward walk.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasPrev, prevCursor, loadingPrev, posts.length === 0]);
 
   // Backward infinite scroll via a sentinel at the top of the list.
   useEffect(() => {
@@ -318,14 +324,6 @@ export default function VideosFeed({
     setPosts((prev) => prev.filter((p) => p.id !== postId));
   }, []);
 
-  const removeMedia = useCallback((postId: number, mediaId: number) => {
-    setPosts((prev) =>
-      prev.map((p) =>
-        p.id === postId ? { ...p, media: p.media.filter((m) => m.id !== mediaId) } : p
-      )
-    );
-  }, []);
-
   const controlBtn =
     "rounded-full bg-black/50 p-2 text-white ring-1 ring-white/10 backdrop-blur transition hover:bg-black/70";
 
@@ -336,7 +334,7 @@ export default function VideosFeed({
           ? "fixed inset-0 z-30 bg-black"
           : // Stop above the global bottom bar so the caption overlay stays
             // visible — the same sizing as the shorts feed.
-            "relative w-full bg-black h-[calc(100dvh-3.5rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))]"
+            "relative w-full bg-black h-[calc(100dvh-3.5rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] md:h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom))]"
       }
     >
       <div
@@ -359,7 +357,6 @@ export default function VideosFeed({
               onToggleChrome={toggleChrome}
               onToggleFullscreen={toggleFullscreen}
               onRemoved={removePost}
-              onMediaRemoved={removeMedia}
               onPatch={patchPost}
             />
           </div>
