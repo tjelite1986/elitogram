@@ -65,7 +65,7 @@ export default function PostComposer({ canFlagAdult }: { canFlagAdult: boolean }
       <input
         ref={inputRef}
         type="file"
-        accept="*/*"
+        accept="image/*,video/*"
         multiple
         hidden
         onChange={(e) => {
@@ -132,7 +132,8 @@ export default function PostComposer({ canFlagAdult }: { canFlagAdult: boolean }
             onChange={(e) => setIsAdult(e.target.checked)}
             className="size-4 accent-rose-500"
           />
-          Mark as 18+ (hidden until the PIN is unlocked)
+          Mark as 18+ — kept out of Home/Explore unless you opt in, and locked
+          behind your PIN if one is set
         </label>
       )}
 

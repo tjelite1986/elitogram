@@ -23,7 +23,7 @@ export default function AdultPinSettings({ hasPin: initial }: { hasPin: boolean 
     setMsg("");
     setBusy(true);
     try {
-      const r = await fetch("/api/account/adult-pin", {
+      const r = await fetch("/api/adult/pin", {
         method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

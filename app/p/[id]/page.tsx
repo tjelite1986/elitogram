@@ -3,8 +3,9 @@ import { notFound, redirect } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import { getSession } from "@/lib/auth";
 import { loginUrl } from "@/lib/sso";
-import { has18Access } from "@/lib/adult-gate";
+import { has18Access, hasAdultPin } from "@/lib/adult-gate";
 import { getPost } from "@/lib/posts";
+import AdultGate from "@/components/adult-gate";
 import PostCard from "@/components/post-card";
 import PostDeleteButton from "@/components/post-delete-button";
 import PostReassignButton from "@/components/post-reassign-button";
@@ -25,10 +26,11 @@ export default async function PostPermalinkPage(
   const post = getPost(Number(params.id), viewerId);
   if (!post) notFound();
   if (post.is_adult && !(await has18Access())) {
-    // Send adult content through the existing 18+ unlock flow. /videos18 is the
-    // adult section this app still serves; /shorts18 is a redirect out to
-    // another app, which would take the visitor off this one entirely.
-    redirect("/videos18");
+    // Locked 18+ post: show the PIN prompt in place. On a correct PIN the
+    // unlock route sets the gate cookie and the refresh re-renders this page
+    // with the post. (The old redirect went to /videos18, a route that never
+    // existed in this app.)
+    return <AdultGate configured={await hasAdultPin()} />;
   }
 
   const isAdmin = session.role === "admin";
@@ -36,9 +38,9 @@ export default async function PostPermalinkPage(
     isAdmin || (post.author.type === "user" && post.author.id === viewerId);
 
   return (
-    // Full-bleed like the feed: the post photo keeps the same size here as it
-    // has everywhere else instead of being capped to a narrow column.
-    <div className="w-full pb-24 pt-6 text-white">
+    // Same measure as the capped feed card (PostCard maxes at 600px), so the
+    // Back/Delete row hugs the post instead of spanning the whole desktop.
+    <div className="mx-auto w-full max-w-2xl pb-24 pt-6 text-white">
       <div className="mb-2 flex items-center justify-between gap-3 px-4">
         <Link
           href="/"
