@@ -8,17 +8,7 @@ const config: Config = {
     "./lib/**/*.{ts,tsx}",
   ],
   theme: {
-    extend: {
-      keyframes: {
-        menuFadeIn: {
-          from: { opacity: "0", transform: "scale(0.95) translateY(-5px)" },
-          to: { opacity: "1", transform: "scale(1) translateY(0)" },
-        },
-      },
-      animation: {
-        menuFadeIn: "menuFadeIn 0.15s cubic-bezier(0.23, 1, 0.32, 1) forwards",
-      },
-    },
+    extend: {},
   },
   plugins: [require("tailwindcss-animate")],
 };

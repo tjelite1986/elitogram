@@ -140,10 +140,16 @@ once by hand.
 | `IMPORT_CRON_SECRET` | what a background job presents when it loops back over HTTP |
 | `ADULTS_EMAIL` | the account whose stories count as adult |
 | `IG_COOKIES_PATH`, `IG_COOKIES_ROOT` | Instagram session cookies |
+| `IG_COOKIES_HOST_DIR` | host path shown by the cookies admin panel |
+| `IG_MAX_PER_RUN`, `IG_MAX_PER_COOKIE_PER_RUN`, `IG_RETRIES` | Instagram sync throughput/retry knobs |
+| `IG_AVATAR_MAX_PER_RUN`, `IG_AVATAR_GIVE_UP_AFTER`, `IG_AVATAR_BUDGET_MINUTES` | avatar backfill: batch size, dead-cookie cutoff, wall-clock budget |
 | `TIKTOK_COOKIES_PATH`, `TIKTOK_COOKIES_ROOT` | TikTok cookies (optional) |
+| `TT_MAX_PER_RUN`, `TT_PROFILE_SLEEP_SECONDS`, `TT_SLEEP_REQUEST`, `TT_RETRIES`, `TT_TIMEOUT_MINUTES` | TikTok sync throughput/retry knobs |
 | `YT_DLP_BIN`, `GALLERY_DL_BIN`, `PYTHON_BIN` | the downloaders the syncs shell out to |
+| `POSTS_IMPORT_DIR` | overrides the importer's drop folder (default `POSTS_ROOT/_import`) |
+| `PURGE_ARCHIVE_DIR` | purge-creator.mjs moves media there instead of deleting |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Web Push |
-| `BACKUP_DIR`, `BACKUP_KEEP` | the nightly `VACUUM INTO` |
+| `BACKUP_DIR`, `BACKUP_KEEP` | the nightly `VACUUM INTO` (unset means the in-container default) |
 
 ---
 

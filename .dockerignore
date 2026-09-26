@@ -7,3 +7,10 @@ data
 .git
 *.log
 tsconfig.tsbuildinfo
+# Every .env, at any depth, plus the dated backups a plain `.env` rule misses
+# (mirrors .gitignore): the builder stage does COPY . . and a stray env file
+# must not end up in a layer.
+.env
+.env.*
+**/.env
+**/.env.*

@@ -76,7 +76,8 @@ export default function LinkProfiles() {
   function toggle(h: string) {
     setSel((prev) => {
       const n = new Set(prev);
-      n.has(h) ? n.delete(h) : n.add(h);
+      if (n.has(h)) n.delete(h);
+      else n.add(h);
       return n;
     });
   }

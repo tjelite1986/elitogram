@@ -49,41 +49,8 @@
   }
 }
 
-/* Keyframe used by the macOS menu bar dropdown animation.
-   Kept here as a fallback in addition to the styled-jsx block inside the
-   component, so the animation works even outside that component. */
-@keyframes menuFadeIn {
-  from {
-    opacity: 0;
-    transform: scale(0.95) translateY(-5px);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1) translateY(0);
-  }
-}
-
-/* Privacy / screenshot blur — toggled by body classes set by PrivacyControls.tsx */
-
-body.privacy-blur-media img:not([data-no-blur]):not([data-screenshot-keep]),
-body.privacy-blur-media video:not([data-no-blur]):not([data-screenshot-keep]) {
-  filter: blur(14px);
-  transition: filter 0.15s ease;
-}
-
-body.privacy-blur-pii [data-pii] {
-  filter: blur(8px);
-  user-select: none;
-}
-
-[data-manual-blur] {
-  filter: blur(10px) !important;
-  user-select: none;
-}
-
-/* Immersive shorts ("Hide UI"): hide the global nav chrome (top menu bar,
-   Shorts/18+ tabs, category chips) for a true fullscreen. Set by shorts-feed.tsx;
-   long-pressing a clip clears it. */
+/* Immersive video playback ("Hide UI"): hide the nav bar/rail for a true
+   fullscreen. Set by components/videos-feed.tsx; a tap on the clip clears it. */
 body.shorts-immersive [data-immersive-hide] {
   display: none !important;
 }
