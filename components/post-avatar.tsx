@@ -77,6 +77,7 @@ export default function PostAvatar({
           ref={imgRef}
           src={src}
           alt=""
+          decoding="async"
           width={size}
           height={size}
           className={cn(

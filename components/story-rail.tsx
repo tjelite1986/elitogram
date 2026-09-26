@@ -15,6 +15,7 @@ export default function StoryRail({ myUsername }: { myUsername: string }) {
   const [groups, setGroups] = useState<StoryGroup[]>([]);
   const [viewerAt, setViewerAt] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Device Back closes the fullscreen story viewer instead of leaving the feed.
@@ -35,11 +36,19 @@ export default function StoryRail({ myUsername }: { myUsername: string }) {
 
   const upload = async (file: File) => {
     setUploading(true);
+    setUploadError(null);
     const fd = new FormData();
     fd.set("file", file);
     try {
-      await fetch("/api/posts/stories", { method: "POST", body: fd });
+      const res = await fetch("/api/posts/stories", { method: "POST", body: fd });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setUploadError(d.error || "Story upload failed.");
+        return;
+      }
       await load();
+    } catch {
+      setUploadError("Story upload failed — check the connection.");
     } finally {
       setUploading(false);
     }
@@ -53,7 +62,7 @@ export default function StoryRail({ myUsername }: { myUsername: string }) {
       <input
         ref={fileRef}
         type="file"
-        accept="*/*"
+        accept="image/*"
         hidden
         onChange={(e) => {
           const f = e.target.files?.[0];
@@ -111,6 +120,11 @@ export default function StoryRail({ myUsername }: { myUsername: string }) {
           </button>
         ))}
       </div>
+      {uploadError && (
+        <p role="alert" className="mb-2 px-3 text-sm text-rose-400">
+          {uploadError}
+        </p>
+      )}
 
       {viewerAt !== null && groups[viewerAt] && (
         <StoryViewer

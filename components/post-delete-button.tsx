@@ -9,6 +9,7 @@ import { useConfirm } from "@/components/confirm-dialog";
 export default function PostDeleteButton({ postId }: { postId: number }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [confirmDialog, confirmAsk] = useConfirm();
 
   const remove = async () => {
@@ -19,24 +20,40 @@ export default function PostDeleteButton({ postId }: { postId: number }) {
     });
     if (!ok) return;
     setBusy(true);
-    const res = await fetch(`/api/posts/${postId}`, { method: "DELETE" });
-    if (res.ok) {
-      router.push("/");
-      router.refresh();
-    } else {
-      setBusy(false);
+    setError(null);
+    try {
+      const res = await fetch(`/api/posts/${postId}`, { method: "DELETE" });
+      if (res.ok) {
+        router.push("/");
+        router.refresh();
+        return;
+      }
+      const d = await res.json().catch(() => ({}));
+      setError(d.error || "Delete failed.");
+    } catch {
+      setError("Delete failed — check the connection.");
     }
+    // A silent re-enable reads as "nothing happened" and invites a second
+    // press; the message says what actually did.
+    setBusy(false);
   };
 
   return (
     <>
-      <button
-        onClick={remove}
-        disabled={busy}
-        className="inline-flex items-center gap-1.5 text-sm text-rose-300 transition hover:text-rose-400 disabled:opacity-50"
-      >
-        <Trash2 size={15} /> Delete
-      </button>
+      <span className="inline-flex items-center gap-2">
+        {error && (
+          <span role="alert" className="text-xs text-rose-400">
+            {error}
+          </span>
+        )}
+        <button
+          onClick={remove}
+          disabled={busy}
+          className="inline-flex items-center gap-1.5 text-sm text-rose-300 transition hover:text-rose-400 disabled:opacity-50"
+        >
+          <Trash2 size={15} /> Delete
+        </button>
+      </span>
       {confirmDialog}
     </>
   );

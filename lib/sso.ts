@@ -10,10 +10,12 @@
  * token stays signed for a week. So the token goes back to elite-v2 to be
  * resolved, and the signing secret stays in the one app that needs it.
  *
- * The cost is a round trip. It is paid over the internal docker network
- * (`ELITE_VERIFY_URL` points at the container, not the public hostname) and
- * answers are cached for 30 s, so a page that resolves the session several
- * times asks once and revocation lags by at most that.
+ * The cost is a round trip. In production it crosses the LAN to the Pi
+ * (`ELITE_VERIFY_URL` is elite-v2's public URL — the two apps run on
+ * different machines, so there is no shared docker network). Answers are
+ * cached for 30 s and concurrent cold callers share one in-flight request,
+ * so a page that resolves the session many times asks once and revocation
+ * lags by at most the TTL.
  */
 export const SESSION_COOKIE = "elite_session";
 /**
@@ -108,6 +110,11 @@ function remember(token: string, user: EliteUser | null): EliteUser | null {
   return user;
 }
 
+// One round trip per token, however many callers arrive at once: a page that
+// loads 30-60 images fires that many cold session checks in parallel, and
+// without this each of them paid its own TLS round trip to elite-v2.
+const inFlight = new Map<string, Promise<EliteUser | null>>();
+
 /** Resolve a raw session token against elite-v2. */
 export async function verifyToken(token: string): Promise<EliteUser | null> {
   const url = process.env.ELITE_VERIFY_URL;
@@ -116,6 +123,17 @@ export async function verifyToken(token: string): Promise<EliteUser | null> {
   const hit = cache.get(token);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.user;
 
+  const pending = inFlight.get(token);
+  if (pending) return pending;
+  const p = verifyTokenUncached(url, token).finally(() => inFlight.delete(token));
+  inFlight.set(token, p);
+  return p;
+}
+
+async function verifyTokenUncached(
+  url: string,
+  token: string
+): Promise<EliteUser | null> {
   let res: Response;
   try {
     res = await fetch(url, {

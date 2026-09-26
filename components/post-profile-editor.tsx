@@ -67,7 +67,7 @@ export default function PostProfileEditor({ initial }: { initial: Profile }) {
         <input
           ref={fileRef}
           type="file"
-          accept="*/*"
+          accept="image/*"
           hidden
           onChange={(e) => {
             const f = e.target.files?.[0];

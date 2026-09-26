@@ -293,6 +293,7 @@ export default function PostGrid({
                   src={`/api/posts/media/${p.media[0].id}?size=${uncropped ? "fit" : "thumb"}`}
                   alt=""
                   loading="lazy"
+                  decoding="async"
                   className="h-full w-full object-cover transition group-hover:opacity-80"
                 />
               )}

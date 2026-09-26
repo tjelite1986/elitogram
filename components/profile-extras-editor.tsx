@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Loader2, Plus, Trash2, Image as ImageIcon, Eye, EyeOff } from "lucide-react";
 import PostAvatar from "@/components/post-avatar";
 import AvatarCropModal from "@/components/avatar-crop-modal";
+import { clearPeopleDirCache } from "@/components/people-directory";
 import type { ProfileLink, ProfileField } from "@/lib/profiles";
 
 // Edit a profile's cross-section extras: cover banner, bio, labeled links, and
@@ -153,6 +154,9 @@ export default function ProfileExtrasEditor({
     });
     if (res.ok) {
       setAvatarBust(Date.now());
+      // The /people list caches hasAvatar per row; drop it so the new picture
+      // shows up on the next visit instead of after the tab closes.
+      clearPeopleDirCache();
       router.refresh();
     } else {
       const d = await res.json().catch(() => ({}));
@@ -276,7 +280,7 @@ export default function ProfileExtrasEditor({
         <input
           ref={fileRef}
           type="file"
-          accept="*/*"
+          accept="image/*"
           hidden
           onChange={(e) => {
             const f = e.target.files?.[0];
