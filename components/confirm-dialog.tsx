@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useBackDismiss } from "@/lib/use-back-dismiss";
 
 interface ConfirmOptions {
@@ -57,12 +57,35 @@ function ConfirmDialog({
 }) {
   // Device Back dismisses the popup instead of leaving the page.
   useBackDismiss(opts !== null, onCancel);
+
+  // Escape answers the dialog, and the capture-phase stopPropagation keeps it
+  // from also reaching the lightbox's window listener underneath.
+  useEffect(() => {
+    if (!opts) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onCancel();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [opts, onCancel]);
+
+  // If the dialog disappears with the question unanswered (the surface under
+  // it closed), resolve the pending promise as "no" — otherwise the stale
+  // confirmation reappears over the next post and deletes the earlier one.
+  const cancelRef = useRef(onCancel);
+  cancelRef.current = onCancel;
+  useEffect(() => () => cancelRef.current(), []);
+
   if (!opts) return null;
   return (
     // z-[1300]: above lightboxes (z-50) and the floating controls (z-[1100]).
     <div
       className="fixed inset-0 z-[1300] flex items-center justify-center bg-black/60 p-6"
       onClick={onCancel}
+      role="dialog"
+      aria-modal="true"
     >
       <div
         className="w-full max-w-sm rounded-2xl bg-neutral-900 p-5 text-white shadow-xl ring-1 ring-white/10"

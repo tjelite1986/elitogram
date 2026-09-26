@@ -100,23 +100,29 @@ export default function MentionInput({
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (open) {
+      // stopPropagation keeps the dropdown's own keys from also reaching the
+      // lightbox's window listener (which would step posts / close sheets).
       if (e.key === "ArrowDown") {
         e.preventDefault();
+        e.stopPropagation();
         setActive((a) => Math.min(suggestions.length - 1, a + 1));
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
+        e.stopPropagation();
         setActive((a) => Math.max(0, a - 1));
         return;
       }
       if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
+        e.stopPropagation();
         insert(suggestions[active].username);
         return;
       }
       if (e.key === "Escape") {
         e.preventDefault();
+        e.stopPropagation();
         setQuery(null);
         return;
       }

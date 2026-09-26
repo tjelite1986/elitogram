@@ -196,17 +196,30 @@ export default function PostLightbox({
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent) => {
+      // While the caret sits in a form field (the caption textarea, the
+      // comment box) the arrows must move the caret, not the lightbox —
+      // otherwise Save can write the draft onto a different post. Escape is
+      // handled first because the caption textarea autofocuses, so it is
+      // always the key target while its sheet is open.
+      const t = e.target as HTMLElement | null;
+      const typing =
+        !!t &&
+        (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
       if (e.key === "Escape") {
-        if (commentsOpen) setCommentsOpen(false);
+        if (showEdit) setShowEdit(false);
+        else if (commentsOpen) setCommentsOpen(false);
         else closeAll();
-      } else if (e.key === "ArrowLeft") stepPhoto(-1);
+        return;
+      }
+      if (typing || showEdit || commentsOpen) return;
+      if (e.key === "ArrowLeft") stepPhoto(-1);
       else if (e.key === "ArrowRight") stepPhoto(1);
       else if (e.key === "ArrowUp") stepPost(-1);
       else if (e.key === "ArrowDown") stepPost(1);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [isOpen, commentsOpen, stepPhoto, stepPost, closeAll]);
+  }, [isOpen, commentsOpen, showEdit, stepPhoto, stepPost, closeAll]);
 
   // Wheel = step posts (debounced: one gesture fires many wheel events).
   const wheelAt = useRef(0);
@@ -381,7 +394,7 @@ export default function PostLightbox({
           <div className="flex items-center gap-5">
             <button
               onClick={() => toggleLike(post)}
-              className="flex items-center gap-1.5 text-white transition active:scale-90"
+              className="-m-2 flex items-center gap-1.5 p-2 text-white transition active:scale-90"
               aria-label="Like"
             >
               <Heart
@@ -394,7 +407,7 @@ export default function PostLightbox({
             </button>
             <button
               onClick={() => setCommentsOpen(true)}
-              className="flex items-center gap-1.5 text-white transition active:scale-90"
+              className="-m-2 flex items-center gap-1.5 p-2 text-white transition active:scale-90"
               aria-label="Comments"
             >
               <MessageCircle size={23} />
@@ -418,6 +431,9 @@ export default function PostLightbox({
 
       {showEdit && post && (
         <EditCaptionSheet
+          // Keyed so a draft can never ride onto another post if anything
+          // re-navigates while the sheet is open.
+          key={post.id}
           postId={post.id}
           initial={post.caption ?? ""}
           onClose={() => setShowEdit(false)}
