@@ -47,6 +47,9 @@ const MISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_LIMIT = Number(process.env.IG_AVATAR_MAX_PER_RUN) || 25;
 // Consecutive failures that mean "stop asking" — a spent cookie, or a block.
 const GIVE_UP_AFTER = Number(process.env.IG_AVATAR_GIVE_UP_AFTER) || 5;
+// Wall-clock budget, comfortably under the job runner's 1-hour kill: better to
+// stop cleanly with the misses written than be SIGTERM'd mid-batch.
+const BUDGET_MS = (Number(process.env.IG_AVATAR_BUDGET_MINUTES) || 40) * 60 * 1000;
 
 const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
 
@@ -113,7 +116,9 @@ function creatorsWithoutAvatar(db) {
 
 // One python process for the whole batch: ig_profile.py picks a working cookie
 // once, builds one loader and paces itself between profiles. Yields one parsed
-// JSON object per handle, in order.
+// JSON object per handle, in order. onProfile returning false aborts the batch
+// (the child is killed) — that is how a dead cookie stops costing an hour.
+let currentChild = null;
 function fetchProfiles(handles, onProfile) {
   return new Promise((resolve, reject) => {
     const child = spawn(PYTHON, [path.join(process.cwd(), "scripts", "ig_profile.py"), "batch"], {
@@ -125,25 +130,35 @@ function fetchProfiles(handles, onProfile) {
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
+    currentChild = child;
     let buf = "";
     let stderr = "";
+    let aborted = false;
     child.stdout.on("data", (d) => {
+      if (aborted) return;
       buf += d.toString();
       let nl;
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line) continue;
+        let keepGoing = true;
         try {
-          onProfile(JSON.parse(line));
+          keepGoing = onProfile(JSON.parse(line)) !== false;
         } catch {
           log(`unparsable line from ig_profile.py: ${line.slice(0, 120)}`);
+        }
+        if (!keepGoing) {
+          aborted = true;
+          child.kill("SIGTERM");
+          return;
         }
       }
     });
     child.stderr.on("data", (d) => (stderr += d.toString()));
     child.on("error", reject);
     child.on("close", (code) => {
+      currentChild = null;
       if (stderr.trim()) log(`ig_profile.py stderr: ${stderr.trim().slice(0, 400)}`);
       resolve(code);
     });
@@ -220,15 +235,28 @@ async function main() {
     let missed = 0;
     let streak = 0;
     const pending = [];
+    const startedAt = Date.now();
+    // A transport-level failure (rate limit, dead cookie, network) says
+    // nothing about the HANDLE — parking it for a week would slowly park the
+    // whole work list on transient errors. Only a real answer ("no such
+    // account", "no picture") is a miss worth remembering.
+    const isTransient = (err) =>
+      /429|too many requests|connection|timeout|temporarily|rate.?limit|login_required|checkpoint|redirected/i.test(
+        String(err || "")
+      );
 
     await fetchProfiles(
       batch.map((r) => r.username),
       (profile) => {
         const handle = String(profile.username || "").toLowerCase();
-        if (!handle) return;
+        if (!handle) return true;
         if (profile.profile_pic_url) {
           pending.push({ handle, url: profile.profile_pic_url });
           streak = 0;
+        } else if (profile.error && isTransient(profile.error)) {
+          missed++;
+          streak++;
+          log(`transient failure for ${handle} (not parked): ${profile.error}`);
         } else {
           missed++;
           streak++;
@@ -237,12 +265,17 @@ async function main() {
             `miss ${handle}: ${profile.error || (profile.exists === false ? "no such account" : "no picture")}`
           );
         }
-        // The python side keeps going regardless; the counter is what tells the
-        // NEXT run to stop early, and it is logged here so a dead cookie is
-        // visible in the job output rather than buried.
-        if (streak === GIVE_UP_AFTER) {
-          log(`${GIVE_UP_AFTER} misses in a row — the cookie is probably spent or rate-limited.`);
+        if (streak >= GIVE_UP_AFTER) {
+          log(
+            `${GIVE_UP_AFTER} misses in a row — the cookie is probably spent or rate-limited. Stopping this run.`
+          );
+          return false;
         }
+        if (Date.now() - startedAt > BUDGET_MS) {
+          log(`wall-clock budget spent — stopping this run cleanly.`);
+          return false;
+        }
+        return true;
       }
     );
 
@@ -273,6 +306,23 @@ async function main() {
     }
   }
 }
+
+// The job runner SIGTERMs at its cap; without this the lock file survives and
+// the NEXT run exits 0 as "already in progress" — a green job doing nothing.
+process.on("SIGTERM", () => {
+  try {
+    currentChild?.kill("SIGTERM");
+  } catch {
+    /* already gone */
+  }
+  try {
+    fs.unlinkSync(LOCK);
+  } catch {
+    /* nothing to clean */
+  }
+  log("terminated by signal — lock released.");
+  process.exit(143);
+});
 
 main().catch((e) => {
   try {
