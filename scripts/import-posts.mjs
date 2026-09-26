@@ -593,9 +593,23 @@ async function processImage(username, srcPath, originalName) {
   }
 }
 
+// Mirrors isReservedAuthorName in lib/posts-storage.ts: these folder names
+// under POSTS_ROOT are shared stores (profile pictures, banners, the drop
+// folder itself), never a creator's media directory. Importing under one
+// would intermix post media with the avatar store.
+const RESERVED_CREATOR_NAMES = new Set(["avatars", "banners", "_import"]);
+function isReservedCreator(username) {
+  return RESERVED_CREATOR_NAMES.has(username) || username.startsWith("u_");
+}
+
 // Dispatch a single file: images and videos both become post media (videos
 // surface under the posts Videos tab), anything else is ignored.
 async function handleFile(username, srcPath, originalName) {
+  if (isReservedCreator(username)) {
+    log(`skip ${originalName}: creator name "${username}" is a reserved storage folder`);
+    skipped++;
+    return;
+  }
   const ext = path.extname(originalName).toLowerCase();
   if (IMG_EXTS.has(ext)) await processImage(username, srcPath, originalName);
   else if (VIDEO_EXTS.has(ext) || ANIM_EXTS.has(ext))
@@ -615,6 +629,10 @@ for (const entry of entries) {
     // and videos become video posts (filenames don't matter). One level deep. A bad
     // folder must not abort the whole run.
     const username = creatorUsername(entry.name);
+    if (isReservedCreator(username) || isReservedCreator(entry.name)) {
+      log(`skip folder ${entry.name}: reserved storage name — not importing as a creator`);
+      continue;
+    }
     const dir = path.join(IMPORT_DIR, entry.name);
     try {
       for (const f of fs.readdirSync(dir)) {

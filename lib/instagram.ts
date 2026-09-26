@@ -12,7 +12,7 @@ import { db } from "./db";
 import { qb, getOne, getAll } from "./kysely";
 import { handleOf } from "./directory";
 import { setProfileInstagram } from "./profiles";
-import { storeAvatar } from "./posts-storage";
+import { storeAvatar, isReservedAuthorName } from "./posts-storage";
 import { safeHttpUrl } from "./url";
 
 // Instagram cookie-based info-sync + media poll, driven per profile. A profile
@@ -468,6 +468,10 @@ export async function applyToPeople(
         db.prepare(
           "UPDATE post_creators SET display_name = COALESCE(?, display_name), bio = COALESCE(?, bio) WHERE id = ?"
         ).run(meta.displayName, meta.bio, creator.id);
+      } else if (isReservedAuthorName(handle)) {
+        // A remote account named after a shared storage folder must never
+        // become a creator — its media folder would be the avatar store.
+        console.error(`[instagram] refusing to create creator "${handle}": reserved storage name`);
       } else {
         db.prepare(
           "INSERT INTO post_creators (username, display_name, bio, source) VALUES (?, ?, ?, ?)"

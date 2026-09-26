@@ -4,7 +4,7 @@ import { qb, getOne, getAll } from "@/lib/kysely";
 import { getSession } from "@/lib/auth";
 import { getPostRow } from "@/lib/posts";
 import { usernameTaken } from "@/lib/profiles";
-import { movePostImageToAuthor } from "@/lib/posts-storage";
+import { movePostImageToAuthor, isReservedAuthorName } from "@/lib/posts-storage";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +39,12 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
     const username = body.username.trim().toLowerCase().replace(/[^a-z0-9._]/g, "");
     if (username.length < 2) {
       return NextResponse.json({ error: "Invalid username." }, { status: 400 });
+    }
+    if (isReservedAuthorName(username)) {
+      return NextResponse.json(
+        { error: "That name is a reserved storage folder." },
+        { status: 400 }
+      );
     }
     creator = getOne<PostCreatorRow>(
       qb.selectFrom("post_creators").selectAll().where("username", "=", username)

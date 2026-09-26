@@ -49,6 +49,26 @@ export function authorSlug(name: string | null | undefined): string {
   return slug || "unknown";
 }
 
+// Names whose folder under POSTS_ROOT is shared infrastructure, not a
+// creator's media directory. A creator must never claim one: its post media
+// would be written straight into the avatar/banner store, and cleanup tools
+// walking "the creator's folder" would take every profile picture with it.
+export function isReservedAuthorName(name: string | null | undefined): boolean {
+  const raw = (name || "").trim().toLowerCase();
+  const slug = authorSlug(name);
+  for (const candidate of [raw, slug]) {
+    if (
+      candidate === AVATARS_SUBDIR ||
+      candidate === BANNERS_SUBDIR ||
+      candidate === IMPORT_SUBDIR ||
+      candidate.startsWith("u_")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function ensureDir(dir: string) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
@@ -86,17 +106,27 @@ export async function ensureFitThumb(
   if (fs.existsSync(dest)) return key;
   const src = mediaPathFor(storageKey);
   if (!fs.existsSync(src)) return null;
+  // Write to a temp name and rename into place: a concurrent request must
+  // never stream a half-written derivative, and a crash mid-write must not
+  // leave a truncated file that existsSync accepts forever.
+  const tmp = `${dest}.tmp-${randomUUID()}`;
   try {
     if (isVideoKey(storageKey)) {
-      makeVideoFitPoster(src, dest);
+      makeVideoFitPoster(src, tmp);
     } else {
       await sharp(src, { failOn: "none" })
         .resize(THUMB_SIZE, THUMB_SIZE, { fit: "inside", withoutEnlargement: true })
         .jpeg({ quality: 75 })
-        .toFile(dest);
+        .toFile(tmp);
     }
+    fs.renameSync(tmp, dest);
     return key;
   } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* never written */
+    }
     console.error("[posts-storage] fit thumb failed for", storageKey, err);
     return null;
   }

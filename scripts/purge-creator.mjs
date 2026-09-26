@@ -36,6 +36,18 @@ const die = (m) => {
 
 if (!username) die("usage: purge-creator.mjs <username> [--yes]");
 
+// Reserved storage folders (lib/posts-storage.ts): POSTS_ROOT/<name> for these
+// names is shared infrastructure, not a creator's media directory. The junk
+// "avatars"/"banners" creators the importer once made live in the same folder
+// as every profile picture — purging them here would rm -rf the avatar store.
+const RESERVED = ["avatars", "banners", "_import"];
+if (RESERVED.includes(username) || username.startsWith("u_")) {
+  die(
+    `${username} is a reserved storage folder, not a creator directory — ` +
+      `refusing. Soft-delete the posts instead (see scripts/retire-reserved-creators.mjs).`
+  );
+}
+
 const db = new Database(DB_PATH);
 db.pragma("busy_timeout = 30000");
 db.pragma("journal_mode = WAL");
@@ -78,6 +90,19 @@ const foreign = db
   )
   .get(`${prefix}%`, creator.id).n;
 if (foreign) die(`${foreign} media row(s) under ${prefix} belong to another author — refusing to purge`);
+// The post_media guards above cannot see files that only avatar/banner tables
+// reference. If any live avatar or banner key points into this directory, the
+// directory is shared and removing it wholesale destroys profile pictures.
+const sharedRefs = [
+  ["handle_avatars.avatar_key", "SELECT COUNT(*) AS n FROM handle_avatars WHERE avatar_key LIKE ?"],
+  ["user_profiles.avatar_key", "SELECT COUNT(*) AS n FROM user_profiles WHERE avatar_key LIKE ?"],
+  ["post_creators.avatar_key", "SELECT COUNT(*) AS n FROM post_creators WHERE avatar_key LIKE ?"],
+  ["profile_extras.banner_key", "SELECT COUNT(*) AS n FROM profile_extras WHERE banner_key LIKE ?"],
+];
+for (const [label, sql] of sharedRefs) {
+  const n = db.prepare(sql).get(`${prefix}%`).n;
+  if (n) die(`${n} ${label} row(s) point into ${prefix} — the directory is shared, refusing to purge`);
+}
 
 const mediaDir = path.join(POSTS_ROOT, username);
 const onDisk = fs.existsSync(mediaDir)
