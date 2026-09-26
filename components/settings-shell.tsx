@@ -148,7 +148,9 @@ function Shell({
   return (
     <div className="mx-auto max-w-3xl px-3 pb-24 pt-6 text-white">
       <h1 className="mb-4 px-1 text-lg font-semibold">Settings</h1>
-      <div className="mb-5 flex gap-1.5 overflow-x-auto pb-1">
+      {/* Phone: one scrollable row. Desktop: wrap instead — a clipped row with
+          no visible scrollbar reads as tabs missing. */}
+      <div className="mb-5 flex gap-1.5 overflow-x-auto pb-1 md:flex-wrap md:overflow-visible">
         {visible.map((t) => (
           <Link
             key={t.key}

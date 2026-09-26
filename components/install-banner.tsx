@@ -63,9 +63,9 @@ export default function InstallBanner() {
 
   return (
     <div
-      className="fixed inset-x-4 z-40 mx-auto flex max-w-md items-center gap-3 rounded-2xl border border-white/10 bg-neutral-900/95 p-3 shadow-lg backdrop-blur"
-      // Clear of the bottom nav (3.5rem) and the device's own bottom inset.
-      style={{ bottom: "calc(3.5rem + env(safe-area-inset-bottom) + 0.75rem)" }}
+      // Clear of the bottom nav (3.5rem) and the device's own bottom inset;
+      // on md+ the nav is a left rail, so the banner sits at the bottom edge.
+      className="fixed inset-x-4 z-40 mx-auto flex max-w-md items-center gap-3 rounded-2xl border border-white/10 bg-neutral-900/95 p-3 shadow-lg backdrop-blur bottom-[calc(3.5rem+env(safe-area-inset-bottom)+0.75rem)] md:bottom-[calc(env(safe-area-inset-bottom)+0.75rem)]"
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src="/icon-192.png" alt="" className="h-10 w-10 rounded-xl" />

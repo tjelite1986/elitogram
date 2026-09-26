@@ -32,7 +32,7 @@ export default async function EditProfilePage(
   const aliases = listAliases(person.handle);
 
   return (
-    <div className="mx-auto max-w-md px-4 pb-24 pt-24 text-white">
+    <div className="mx-auto max-w-md px-4 pb-24 pt-6 text-white">
       <div className="mb-4 flex items-center gap-2">
         <Link
           href={`/people/${person.handle}`}

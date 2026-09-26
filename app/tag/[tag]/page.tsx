@@ -21,7 +21,7 @@ export default async function PostsTagPage(
   return (
     // Full-bleed like the feed, so grid tiles and single-column cards are the
     // same size here as everywhere else.
-    <div className="w-full pb-24 pt-6 text-white">
+    <div className="mx-auto w-full max-w-6xl pb-24 pt-6 text-white">
       <h1 className="mb-4 px-3 text-lg font-semibold">#{tag}</h1>
       <PostGrid
         query={{ scope: "tag", tag }}

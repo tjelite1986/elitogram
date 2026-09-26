@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import BioText from "@/components/bio-text";
+import { clearPeopleDirCache } from "@/components/people-directory";
 import { useRouter } from "next/navigation";
 import { Camera, Pencil, X, Link as LinkIcon, MapPin, CalendarDays, Lock, Upload } from "lucide-react";
 
@@ -158,12 +159,15 @@ export default function PersonProfile({
     if (res.ok) {
       setCropFile(null);
       setAvatarBust(Date.now());
+      // The /people list caches hasAvatar per row; drop it so the new picture
+      // shows up on the next visit instead of after the tab closes.
+      clearPeopleDirCache();
       router.refresh();
     }
   };
 
   return (
-    <div className="mx-auto max-w-2xl px-4 pb-24 pt-20 text-white">
+    <div className="mx-auto max-w-2xl px-4 pb-24 pt-6 text-white md:max-w-3xl">
       {/* Cover banner */}
       {person.hasBanner && (
         // eslint-disable-next-line @next/next/no-img-element
@@ -254,7 +258,7 @@ export default function PersonProfile({
           photo. */}
       {selecting ? (
         <div className="space-y-6">
-          <div className="sticky top-16 z-30 flex items-center justify-between rounded-xl bg-rose-500/90 px-4 py-2.5 text-sm font-semibold backdrop-blur">
+          <div className="sticky top-[env(safe-area-inset-top)] z-30 flex items-center justify-between rounded-xl bg-rose-500/90 px-4 py-2.5 text-sm font-semibold backdrop-blur">
             <span>{busy ? "Setting…" : "Tap a photo to use as profile picture"}</span>
             <button onClick={() => setSelecting(false)} aria-label="Cancel" className="ml-3">
               <X size={18} />

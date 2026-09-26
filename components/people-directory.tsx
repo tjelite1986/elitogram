@@ -33,16 +33,33 @@ interface DirCache {
   nextOffset: number | null;
   total: number | null;
   scrollY: number;
+  at?: number;
 }
-const CACHE_KEY = "people-dir-v4";
+// Exported so the avatar editors can invalidate the cached rows after a save —
+// a cached hasAvatar:false otherwise hides a freshly set picture until the tab
+// closes. v5 retires blobs without the timestamp.
+export const PEOPLE_DIR_CACHE_KEY = "people-dir-v5";
+const CACHE_KEY = PEOPLE_DIR_CACHE_KEY;
+// Same idea as the feed's pf: cache: stale rows self-heal after five minutes.
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 function readCache(): DirCache | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = sessionStorage.getItem(CACHE_KEY);
-    return raw ? (JSON.parse(raw) as DirCache) : null;
+    const c = raw ? (JSON.parse(raw) as DirCache) : null;
+    if (!c || Date.now() - (c.at || 0) > CACHE_TTL_MS) return null;
+    return c;
   } catch {
     return null;
+  }
+}
+
+export function clearPeopleDirCache() {
+  try {
+    sessionStorage.removeItem(PEOPLE_DIR_CACHE_KEY);
+  } catch {
+    /* disabled storage — nothing cached anyway */
   }
 }
 
@@ -205,7 +222,11 @@ export default function PeopleDirectory() {
     try {
       sessionStorage.setItem(
         CACHE_KEY,
-        JSON.stringify({ ...stateRef.current, scrollY: scrollYRef.current })
+        JSON.stringify({
+          ...stateRef.current,
+          scrollY: scrollYRef.current,
+          at: Date.now(),
+        })
       );
     } catch {
       /* quota / disabled — degrade to no restore */
@@ -241,7 +262,7 @@ export default function PeopleDirectory() {
   }, [load, nextOffset]);
 
   return (
-    <div className="mx-auto max-w-4xl px-3 pb-24 pt-24 text-white">
+    <div className="mx-auto max-w-4xl px-3 pb-24 pt-6 text-white xl:max-w-6xl">
       <h1 className="mb-4 text-2xl font-semibold tracking-tight">People</h1>
       <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="flex flex-1 items-center gap-2 rounded-full bg-white/10 px-4 py-2.5">
@@ -312,7 +333,7 @@ export default function PeopleDirectory() {
           outgoing navigation scrolls the window to top), and block further scroll
           writes so it can't be clobbered while this page is still mounted. */}
       <div
-        className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3"
+        className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
         onClickCapture={() => {
           scrollYRef.current = window.scrollY;
           restoringRef.current = true;

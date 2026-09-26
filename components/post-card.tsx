@@ -5,23 +5,12 @@ import Link from "next/link";
 import { Heart, MessageCircle, X, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBackDismiss } from "@/lib/use-back-dismiss";
-import { SOURCE_RE } from "@/lib/caption-source";
+import { SOURCE_RE, sourceLabel } from "@/lib/caption-source";
 import PostAvatar from "@/components/post-avatar";
 import PostInlineVideo from "@/components/post-inline-video";
 import Markdown from "@/components/markdown";
 import MentionInput from "@/components/mention-input";
 import type { FeedPost } from "@/lib/posts";
-
-// "https://www.instagram.com/p/CX12ab/" → "instagram.com/p/CX12ab": enough of
-// the link to recognise where a post came from, short enough for a meta line.
-function sourceLabel(url: string): string {
-  try {
-    const u = new URL(url);
-    return (u.host.replace(/^www\./, "") + u.pathname).replace(/\/$/, "");
-  } catch {
-    return url;
-  }
-}
 
 function relativeTime(s: string): string {
   const diff = Date.now() - new Date(s.replace(" ", "T") + "Z").getTime();
@@ -139,7 +128,10 @@ export default function PostCard({
     // Spacing per the Layout Studio sketch (docs/elite-v2): no card frame, 6px
     // outside the card and 12px in, so every row — header, photo, actions,
     // caption — lines up 18px from the screen edge.
-    <article className="mx-1.5 overflow-hidden pb-3">
+    // sm:max-w caps the card on desktop: without it one photo is 1400px+ tall
+    // and like/caption land below the fold. The stored display JPEG is 2048px,
+    // so 600 only downscales.
+    <article className="mx-1.5 overflow-hidden pb-3 sm:mx-auto sm:w-full sm:max-w-[600px]">
       {/* Header — the meta line carries the time and, when the caption came
           with one, the post's source link. */}
       <header className="flex items-center gap-2.5 px-3 py-2.5">
@@ -198,6 +190,7 @@ export default function PostCard({
                 src={`/api/posts/media/${m.id}`}
                 alt=""
                 loading="lazy"
+                decoding="async"
                 onClick={() => handleImageClick(i)}
                 onDoubleClick={handleImageDoubleClick}
                 className="aspect-square w-full shrink-0 snap-center object-cover"
@@ -222,9 +215,11 @@ export default function PostCard({
 
       {/* Actions — each icon carries its own count, per the sketch. */}
       <div className="flex items-center gap-5 px-3 pt-2.5">
+        {/* -m-2 p-2 grows the hit box to ~40px without moving the icons:
+            flex gap measures between margin boxes. */}
         <button
           onClick={toggleLike}
-          className="flex items-center gap-1.5 transition active:scale-90"
+          className="-m-2 flex items-center gap-1.5 p-2 transition active:scale-90"
           aria-label="Like"
         >
           <Heart
@@ -237,7 +232,7 @@ export default function PostCard({
         </button>
         <button
           onClick={() => setShowComments(true)}
-          className="flex items-center gap-1.5 transition active:scale-90"
+          className="-m-2 flex items-center gap-1.5 p-2 transition active:scale-90"
           aria-label="Comments"
         >
           <MessageCircle size={23} className="text-white" />
@@ -249,8 +244,9 @@ export default function PostCard({
 
       {/* Meta — the handle sits on its own line above the caption. The like
           total lives beside the heart above; a separate "128 likes" line would
-          print the same number twice. */}
-      <div className="px-3 pt-2">
+          print the same number twice. pt-3 keeps the grown Like hit box from
+          overlapping the handle link. */}
+      <div className="px-3 pt-3">
         {caption && (
           <div className="text-sm text-white/90">
             <Link href={`/people/${handle}`} className="block font-semibold text-white">

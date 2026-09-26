@@ -3,7 +3,7 @@ import { db } from "./db";
 import { qb, getOne, getAll } from "./kysely";
 import { getProfileExtras, handlesWithAvatar, ProfileLink, ProfileField } from "./profiles";
 import { resolveBadges } from "./badges";
-import { getPrimaryHandle, personContentIds, getGroupMembers } from "./profile-links";
+import { getPrimaryHandle, personContentIds } from "./profile-links";
 
 // A badge as sent to the client — the BadgeDef's `earned` predicate is dropped
 // (a function prop would break server→client serialization).
@@ -184,7 +184,8 @@ export function resolvePerson(
     return null;
   }
 
-  // Photos across every linked member's user/creator identities.
+  // Photos across every linked member's user/creator identities. Without 18+
+  // access the count matches what the viewer's grid will actually show.
   const photos =
     ids.userIds.length || ids.creatorIds.length
       ? getOne<{ c: number }>(
@@ -192,6 +193,7 @@ export function resolvePerson(
             .selectFrom("posts")
             .select((eb) => eb.fn.countAll<number>().as("c"))
             .where("is_deleted", "=", 0)
+            .$if(!include18, (q) => q.where("is_adult", "=", 0))
             .where((eb) =>
               eb.or(
                 [
@@ -498,8 +500,14 @@ export function getPeople(
       return byName(a, b);
     });
   } else {
-    // relevance (default): users first, then by total visible content desc, then handle.
+    // relevance (default): people WITH content first, users before creators
+    // within each half, then by total visible content desc, then handle.
+    // "Users first" alone pinned a screenful of empty login accounts above
+    // every creator this page exists to find.
     list.sort((a, b) => {
+      const aHas = a.photos > 0 ? 1 : 0;
+      const bHas = b.photos > 0 ? 1 : 0;
+      if (bHas !== aHas) return bHas - aHas;
       if ((b.userId !== null ? 1 : 0) !== (a.userId !== null ? 1 : 0)) {
         return (b.userId !== null ? 1 : 0) - (a.userId !== null ? 1 : 0);
       }

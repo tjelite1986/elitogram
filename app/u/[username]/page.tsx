@@ -67,7 +67,7 @@ export default async function PostsProfilePage(
   return (
     // Full-bleed like the feed: only the profile header keeps its own padding,
     // the grid below spans the full width like everywhere else.
-    <div className="w-full pb-24 pt-6 text-white">
+    <div className="mx-auto w-full max-w-6xl pb-24 pt-6 text-white">
       <header className="mb-6 flex items-start gap-5 px-4">
         <PostAvatar username={username} size={80} className="text-xl" />
         <div className="min-w-0 flex-1">

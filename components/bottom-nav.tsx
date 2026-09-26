@@ -130,10 +130,13 @@ export default function BottomNav({
 
   return (
     <>
+      {/* md:pl-56 is unconditional: on desktop the bar becomes a left rail and
+          every page — including full-bleed /videos — must clear it. The bottom
+          reservation stays phone-only. */}
       <div
         className={cn(
-          "pt-[env(safe-area-inset-top)]",
-          !fullBleed && "pb-[calc(3.5rem+env(safe-area-inset-bottom))]"
+          "pt-[env(safe-area-inset-top)] md:pl-56",
+          !fullBleed && "pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0"
         )}
       >
         {children}
@@ -141,11 +144,16 @@ export default function BottomNav({
 
       {/* z-40: below every fullscreen overlay (lightbox and story viewer are
           z-50+) so they cover the bar; hidden during immersive playback by the
-          body.shorts-immersive rule in globals.css. */}
+          body.shorts-immersive rule in globals.css. On md+ the same nav is a
+          fixed left rail instead of a bottom bar — primary navigation at the
+          bottom edge of a 1440px screen is the longest pointer trip there is. */}
       <nav
         data-immersive-hide
-        className="fixed inset-x-0 bottom-0 z-40 flex border-t border-white/10 bg-black/60 pb-[env(safe-area-inset-bottom)] backdrop-blur"
+        className="fixed inset-x-0 bottom-0 z-40 flex border-t border-white/10 bg-black/60 pb-[env(safe-area-inset-bottom)] backdrop-blur md:inset-y-0 md:left-0 md:right-auto md:w-56 md:flex-col md:justify-start md:gap-1 md:border-r md:border-t-0 md:px-3 md:py-6"
       >
+        <div className="hidden px-3 pb-4 text-lg font-semibold tracking-tight text-white md:block">
+          Elitogram
+        </div>
         {TABS.map(({ label, href, icon: Icon }) => {
           const active = !menuOpen && href === activeHref;
           return (
@@ -153,7 +161,7 @@ export default function BottomNav({
               key={href}
               href={href}
               className={cn(
-                "flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] transition",
+                "flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] transition md:flex-none md:flex-row md:justify-start md:gap-3 md:rounded-lg md:px-3 md:py-2.5 md:text-sm md:hover:bg-white/5",
                 active ? "text-violet-400" : "text-white/50 hover:text-white/80"
               )}
             >
@@ -165,7 +173,7 @@ export default function BottomNav({
         <button
           onClick={() => setMenuOpen(true)}
           className={cn(
-            "flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] transition",
+            "flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] transition md:flex-none md:flex-row md:justify-start md:gap-3 md:rounded-lg md:px-3 md:py-2.5 md:text-sm md:hover:bg-white/5",
             menuOpen ? "text-violet-400" : "text-white/50 hover:text-white/80"
           )}
         >

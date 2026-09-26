@@ -14,8 +14,8 @@ export const GRID_COL_ORDER: readonly GridCols[] = [3, 2, 1];
 // as literals in the source.
 export const GRID_COL_CLASS: Record<GridCols, string> = {
   1: "grid-cols-1",
-  2: "grid-cols-2",
-  3: "grid-cols-3",
+  2: "grid-cols-2 md:grid-cols-4 xl:grid-cols-5",
+  3: "grid-cols-3 md:grid-cols-5 xl:grid-cols-6",
 };
 
 function parseCols(raw: string | null): GridCols | null {
