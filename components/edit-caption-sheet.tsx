@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Loader2 } from "lucide-react";
+import { useModal } from "@/lib/use-modal";
 
 // Bottom-sheet caption editor shared by the Videos card and the post lightbox.
 // Posts store one caption; hashtags are re-derived server-side on save via
@@ -21,6 +22,10 @@ export default function EditCaptionSheet({
   const [value, setValue] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Escape closes and the surface behind cannot scroll. This also preempts the
+  // lightbox's own Escape branch for this sheet (see useModal).
+  useModal(true, onClose);
+  const titleId = useId();
 
   const save = async () => {
     setBusy(true);
@@ -47,12 +52,17 @@ export default function EditCaptionSheet({
     <div
       className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60"
       onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
     >
       <div
         className="w-full max-w-md rounded-t-2xl bg-neutral-900 p-5 pb-8 text-white"
         onClick={(e) => e.stopPropagation()}
       >
-        <p className="mb-3 text-base font-semibold">Edit caption</p>
+        <p id={titleId} className="mb-3 text-base font-semibold">
+          Edit caption
+        </p>
         <textarea
           value={value}
           onChange={(e) => setValue(e.target.value)}

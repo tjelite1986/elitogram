@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useBackDismiss } from "@/lib/use-back-dismiss";
+import { useModal } from "@/lib/use-modal";
 
 interface ConfirmOptions {
   title: string;
@@ -55,21 +56,11 @@ function ConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  // Device Back dismisses the popup instead of leaving the page.
+  // Device Back dismisses the popup instead of leaving the page; Escape
+  // answers it and the page behind cannot scroll while it is open.
   useBackDismiss(opts !== null, onCancel);
-
-  // Escape answers the dialog, and the capture-phase stopPropagation keeps it
-  // from also reaching the lightbox's window listener underneath.
-  useEffect(() => {
-    if (!opts) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      onCancel();
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [opts, onCancel]);
+  useModal(opts !== null, onCancel);
+  const titleId = useId();
 
   // If the dialog disappears with the question unanswered (the surface under
   // it closed), resolve the pending promise as "no" — otherwise the stale
@@ -86,12 +77,15 @@ function ConfirmDialog({
       onClick={onCancel}
       role="dialog"
       aria-modal="true"
+      aria-labelledby={titleId}
     >
       <div
         className="w-full max-w-sm rounded-2xl bg-neutral-900 p-5 text-white shadow-xl ring-1 ring-white/10"
         onClick={(e) => e.stopPropagation()}
       >
-        <p className="text-base font-semibold">{opts.title}</p>
+        <p id={titleId} className="text-base font-semibold">
+          {opts.title}
+        </p>
         {opts.message && (
           <p className="mt-1 text-sm text-white/60">{opts.message}</p>
         )}

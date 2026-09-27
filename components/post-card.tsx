@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Heart, MessageCircle, X, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBackDismiss } from "@/lib/use-back-dismiss";
+import { useModal } from "@/lib/use-modal";
 import { SOURCE_RE, sourceLabel } from "@/lib/caption-source";
 import PostAvatar from "@/components/post-avatar";
 import PostInlineVideo from "@/components/post-inline-video";
@@ -308,6 +309,9 @@ export function CommentsSheet({
   const [comments, setComments] = useState<Comment[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
+  // Escape closes and the feed behind cannot scroll (preempts the lightbox's
+  // own Escape branch when this sheet is open there — see useModal).
+  useModal(true, onClose);
 
   useEffect(() => {
     fetch(`/api/posts/${postId}/comments`)
@@ -342,7 +346,13 @@ export function CommentsSheet({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex flex-col justify-end"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Comments"
+    >
       <div
         className="flex max-h-[70%] flex-col rounded-t-2xl bg-neutral-900 text-white"
         onClick={(e) => e.stopPropagation()}

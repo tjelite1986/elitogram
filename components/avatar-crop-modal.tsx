@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, X } from "lucide-react";
 import { useBackDismiss } from "@/lib/use-back-dismiss";
+import { useModal } from "@/lib/use-modal";
 
 const BOX = 300; // on-screen crop viewport (square), px
 const OUT = 512; // exported avatar size, px
@@ -25,6 +26,8 @@ export default function AvatarCropModal({
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
 
   useBackDismiss(true, onCancel);
+  // Escape cancels the crop and the page behind it cannot scroll.
+  useModal(true, onCancel);
 
   useEffect(() => {
     const url = URL.createObjectURL(file);
@@ -88,7 +91,12 @@ export default function AvatarCropModal({
   };
 
   return (
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 p-4">
+    <div
+      className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Crop photo"
+    >
       <div className="w-full max-w-sm rounded-2xl bg-neutral-900 p-5 text-white">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="font-semibold">Crop photo</h3>

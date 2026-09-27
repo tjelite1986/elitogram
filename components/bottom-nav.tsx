@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBackDismiss } from "@/lib/use-back-dismiss";
+import { useModal } from "@/lib/use-modal";
 
 // The four tabs, plus a Menu button for everything that does not earn one.
 // elite-v2 carried these in its own global bar; standing alone, the app has to
@@ -56,6 +57,8 @@ export default function BottomNav({
   // Close the sheet when a menu link navigates away.
   useEffect(() => setMenuOpen(false), [pathname]);
   useBackDismiss(menuOpen, () => setMenuOpen(false));
+  // Escape closes the menu sheet and the page behind it cannot scroll.
+  useModal(menuOpen, () => setMenuOpen(false));
 
   const loadNotifCount = useCallback(async () => {
     try {
@@ -187,6 +190,9 @@ export default function BottomNav({
         <div
           className="fixed inset-0 z-50 flex flex-col justify-end bg-black/50"
           onClick={() => setMenuOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Menu"
         >
           <div
             className="rounded-t-2xl bg-neutral-900 pb-[env(safe-area-inset-bottom)] text-white"

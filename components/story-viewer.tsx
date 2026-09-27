@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import PostAvatar from "@/components/post-avatar";
 import type { StoryGroup } from "@/lib/stories";
+import { useModal } from "@/lib/use-modal";
 
 const STORY_MS = 5000;
 
@@ -78,21 +79,27 @@ export default function StoryViewer({
     };
   }, [story, next]);
 
-  // Escape closes.
+  // Arrows step; Escape and the scroll lock live in useModal (its document
+  // listener swallows Escape before this window listener would see it).
+  useModal(!!story, onClose);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
       if (e.key === "ArrowRight") next();
       if (e.key === "ArrowLeft") prev();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [next, prev, onClose]);
+  }, [next, prev]);
 
   if (!group || !story) return null;
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black">
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Stories"
+    >
       <div className="relative h-full w-full max-w-md">
         {/* Progress bars */}
         <div className="absolute left-0 right-0 top-0 z-20 flex gap-1 p-2">
