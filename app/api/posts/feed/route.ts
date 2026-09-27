@@ -70,6 +70,9 @@ export async function GET(request: Request) {
     case "tag":
       scope = { kind: "tag", tag: url.searchParams.get("tag") || "" };
       break;
+    case "liked":
+      scope = { kind: "liked" };
+      break;
     default:
       scope = { kind: "home" };
   }

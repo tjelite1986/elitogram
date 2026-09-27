@@ -12,6 +12,7 @@ import {
   PlusSquare,
   User,
   Images,
+  Heart,
   Settings,
   ArrowLeft,
   X,
@@ -114,6 +115,7 @@ export default function BottomNav({
     { label: "New post", href: "/create", icon: PlusSquare },
     { label: "My profile", href: `/people/${handle}`, icon: User },
     { label: "My posts", href: "/me", icon: Images },
+    { label: "Liked", href: "/liked", icon: Heart },
     { label: "Settings", href: "/settings", icon: Settings },
   ];
 

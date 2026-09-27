@@ -151,7 +151,8 @@ export type FeedScope =
   | { kind: "user"; userId: number }
   | { kind: "creator"; creatorId: number }
   | { kind: "person"; userIds: number[]; creatorIds: number[] }
-  | { kind: "tag"; tag: string };
+  | { kind: "tag"; tag: string }
+  | { kind: "liked" };
 
 // Cursor-paginated feed (newest first; cursor = last post id seen). Adult posts
 // are excluded unless includeAdult (the caller gates the 18+ PIN). videosOnly
@@ -248,6 +249,19 @@ export function getFeed(
           .selectFrom("post_hashtags")
           .select("post_id")
           .where("tag", "=", scope.tag.toLowerCase())
+      );
+      break;
+    case "liked":
+      // The viewer's own likes only — the retrieval side of the heart. Ordered
+      // by p.id like every feed, so it reads newest-post-first, not
+      // most-recently-liked-first.
+      q = q.where(
+        "p.id",
+        "in",
+        qb
+          .selectFrom("post_likes")
+          .select("post_id")
+          .where("user_id", "=", viewerId)
       );
       break;
   }
