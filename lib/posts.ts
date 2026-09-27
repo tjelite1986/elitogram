@@ -156,10 +156,23 @@ export type FeedScope =
 
 export type MediaFilter = "all" | "videos" | "photos";
 
+export type FeedSort = "new" | "shuffle";
+
 // Cursor-paginated feed (newest first; cursor = last post id seen). Adult posts
 // are excluded unless includeAdult (the caller gates the 18+ PIN). media
 // narrows to posts that carry at least one video (the Videos tab, Explore's
 // Videos chip) or to posts that carry none (Explore's Photos chip).
+//
+// sort=shuffle walks the library in a per-seed pseudo-random order instead:
+// syncs import a creator's whole back catalogue in one id run, so deep in
+// id-order Explore turns into 50-80-post blocks of one creator. The order is
+// id -> (id * c) % 2^32 with a seed-derived odd multiplier c — odd makes it a
+// bijection (every post exactly once, no ties), deterministic makes it
+// pageable: the cursor stays "last post id seen" and the next page resumes
+// strictly above that id's hash. Different seeds use different multipliers,
+// so a reshuffle is a genuinely different order, not a rotation of one order.
+// The trade-off is a scan-and-sort over the scope per page instead of the PK
+// index — fine at 51k posts, revisit if the library grows tenfold.
 export function getFeed(
   scope: FeedScope,
   viewerId: number,
@@ -170,15 +183,35 @@ export function getFeed(
   // Backward pagination: the posts immediately NEWER than this id, for a feed
   // opened part-way down (?focus=) that has to be able to scroll back up.
   // Mutually exclusive with `cursor`, which walks the other way.
-  after: number | null = null
+  after: number | null = null,
+  sort: FeedSort = "new",
+  seed = 1
 ): { items: FeedPost[]; nextCursor: number | null } {
   let q = postBase(viewerId).where("p.is_deleted", "=", 0);
 
+  // The shuffle hash, in SQL and mirrored in JS for the cursor's own value.
+  // Math.imul is multiplication mod 2^32, so the seed-to-multiplier step needs
+  // no BigInt; | 1 keeps the multiplier odd (the bijection requirement). The
+  // JS mirror is exact as long as id * mult < 2^53, i.e. ids below ~2 million.
+  const mult = (Math.imul(seed >>> 0, 2654435761) >>> 0) | 1;
+  const shuffleKey = sql<number>`(${sql.ref("p.id")} * ${mult}) % 4294967296`;
+  const shuffleOf = (id: number) => (id * mult) % 4294967296;
+
   if (!includeAdult) q = q.where("p.is_adult", "=", 0);
-  if (cursor) q = q.where("p.id", "<", cursor);
+  if (cursor) {
+    q =
+      sort === "shuffle"
+        ? q.where(shuffleKey, ">", shuffleOf(cursor))
+        : q.where("p.id", "<", cursor);
+  }
   // Ascending below, so this picks the ids immediately above `after` rather
   // than the newest overall; the page is flipped back to newest-first at the end.
-  if (after !== null) q = q.where("p.id", ">", after);
+  if (after !== null) {
+    q =
+      sort === "shuffle"
+        ? q.where(shuffleKey, "<", shuffleOf(after))
+        : q.where("p.id", ">", after);
+  }
   if (media !== "all") {
     const videoPosts = qb
       .selectFrom("post_media")
@@ -267,7 +300,10 @@ export function getFeed(
   }
 
   const rows = getAll<PostQueryRow>(
-    q.orderBy("p.id", after !== null ? "asc" : "desc").limit(limit + 1)
+    (sort === "shuffle"
+      ? q.orderBy(shuffleKey, after !== null ? "desc" : "asc")
+      : q.orderBy("p.id", after !== null ? "asc" : "desc")
+    ).limit(limit + 1)
   );
 
   const hasMore = rows.length > limit;

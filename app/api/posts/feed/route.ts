@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { has18Access } from "@/lib/adult-gate";
 import { getShowAdultOutside } from "@/lib/profiles";
-import { getFeed, FeedScope, MediaFilter } from "@/lib/posts";
+import { getFeed, FeedScope, FeedSort, MediaFilter } from "@/lib/posts";
 import { personContentIds } from "@/lib/profile-links";
 
 // Parse a comma-separated list of positive integer ids from a query param.
@@ -91,6 +91,13 @@ export async function GET(request: Request) {
       : url.searchParams.get("videos") === "1"
         ? "videos"
         : "all";
+  // `sort=shuffle` walks the scope in a seeded pseudo-random order (Explore's
+  // Shuffle chip); the client keeps the seed stable across pages so they never
+  // overlap. `focus` assumes id order (focus+1 as an inclusive id cursor), so
+  // the surfaces that use it don't offer shuffle.
+  const sort: FeedSort = url.searchParams.get("sort") === "shuffle" ? "shuffle" : "new";
+  const seed = Math.trunc(Number(url.searchParams.get("seed"))) || 1;
+
   const { items, nextCursor } = getFeed(
     scope,
     viewerId,
@@ -98,7 +105,9 @@ export async function GET(request: Request) {
     limit,
     includeAdult,
     media,
-    after > 0 ? after : null
+    after > 0 ? after : null,
+    sort,
+    seed
   );
 
   return NextResponse.json({ items, nextCursor });
