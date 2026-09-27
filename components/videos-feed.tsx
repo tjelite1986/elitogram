@@ -217,6 +217,16 @@ export default function VideosFeed({
 
   const entries = toEntries(posts);
 
+  // Which card owns a real <video> (the render window). Before the first
+  // intersection fires — including right after a restore, while the scroll
+  // position is still being applied — the window sits at the top; the
+  // observer corrects it as soon as a card is 60% visible, because it watches
+  // the wrapper divs, which poster cards render too.
+  const activeIndex = Math.max(
+    activeKey ? entries.findIndex((e) => e.key === activeKey) : 0,
+    0
+  );
+
   // Backward load: the posts immediately newer than the top of the list,
   // prepended. The prepend is committed synchronously (flushSync) and the
   // scroll compensated right after, so nothing can scroll in between and the
@@ -344,23 +354,57 @@ export default function VideosFeed({
         {/* overflow-anchor:none above: loadPrev compensates the scroll itself,
             and the browser's own scroll anchoring would double the shift. */}
         <div ref={topSentinelRef} className="h-px w-full" />
-        {entries.map((entry) => (
-          <div key={entry.key} data-video-key={entry.key} className="h-full w-full">
-            <VideoPostCard
-              post={entry.post}
-              media={entry.post.media[entry.mediaIndex]}
-              active={activeKey === entry.key}
-              muted={muted}
-              onToggleMuted={() => setMuted((m) => !m)}
-              viewer={viewer}
-              chromeHidden={chromeHidden}
-              onToggleChrome={toggleChrome}
-              onToggleFullscreen={toggleFullscreen}
-              onRemoved={removePost}
-              onPatch={patchPost}
-            />
-          </div>
-        ))}
+        {entries.map((entry, i) => {
+          const media = entry.post.media[entry.mediaIndex];
+          // Only the clip in view and its two neighbours own a <video>: the
+          // wrapper div keeps every card's geometry, so mounting a poster
+          // instead changes no layout, no snap point and no loadPrev anchor —
+          // but buffers and decoders no longer accumulate as you scroll, and
+          // a restored 400-post session mounts images, not media players. The
+          // neighbours stay real so the next swipe starts without a stutter.
+          const inWindow = Math.abs(i - activeIndex) <= 1;
+          return (
+            <div key={entry.key} data-video-key={entry.key} className="h-full w-full">
+              {inWindow ? (
+                <VideoPostCard
+                  post={entry.post}
+                  media={media}
+                  active={activeKey === entry.key}
+                  muted={muted}
+                  onToggleMuted={() => setMuted((m) => !m)}
+                  viewer={viewer}
+                  chromeHidden={chromeHidden}
+                  onToggleChrome={toggleChrome}
+                  onToggleFullscreen={toggleFullscreen}
+                  onRemoved={removePost}
+                  onPatch={patchPost}
+                />
+              ) : (
+                // Same outer geometry and snap behaviour as VideoPostCard's
+                // section, same aspect box as its clip.
+                <section className="relative flex h-full w-full snap-start snap-always items-center justify-center bg-black">
+                  <div
+                    className="relative h-full max-w-full"
+                    style={{
+                      aspectRatio:
+                        media.width && media.height
+                          ? `${media.width} / ${media.height}`
+                          : "9 / 16",
+                    }}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={`/api/posts/media/${media.id}?size=thumb`}
+                      alt=""
+                      loading="lazy"
+                      className="h-full w-full object-contain"
+                    />
+                  </div>
+                </section>
+              )}
+            </div>
+          );
+        })}
 
         <div ref={sentinelRef} className="h-1 w-full" />
 
