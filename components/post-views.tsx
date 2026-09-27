@@ -19,6 +19,7 @@ export default function PostViews({
   storageKey,
   defaultView = "feed",
   restoreKey,
+  leading,
 }: {
   query: Record<string, string>;
   empty?: string;
@@ -28,6 +29,9 @@ export default function PostViews({
   defaultView?: View;
   // Passed to the grid/feed so scroll position survives leaving the lightbox.
   restoreKey?: string;
+  // Optional controls rendered on the switcher row, left of the view buttons
+  // (Explore puts its media filter chips here).
+  leading?: React.ReactNode;
 }) {
   const [view, setView] = useState<View>(defaultView);
   // Wait for the saved preference before mounting a list, so we never fetch
@@ -68,7 +72,13 @@ export default function PostViews({
 
   return (
     <div>
-      <div className="mb-1 flex justify-end px-2">
+      <div
+        className={cn(
+          "mb-1 flex items-center px-2",
+          leading ? "justify-between" : "justify-end"
+        )}
+      >
+        {leading}
         <div className="flex items-center gap-1 rounded-full bg-white/5 p-0.5">
           {btn("feed", <Rows3 size={17} />, "Feed view")}
           {btn("grid", <LayoutGrid size={17} />, "Grid view")}

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { has18Access } from "@/lib/adult-gate";
 import { getShowAdultOutside } from "@/lib/profiles";
-import { getFeed, FeedScope } from "@/lib/posts";
+import { getFeed, FeedScope, MediaFilter } from "@/lib/posts";
 import { personContentIds } from "@/lib/profile-links";
 
 // Parse a comma-separated list of positive integer ids from a query param.
@@ -83,13 +83,21 @@ export async function GET(request: Request) {
   const pin = await has18Access();
   const forceAdult = url.searchParams.get("adult") === "1";
   const includeAdult = pin && (forceAdult || getShowAdultOutside(viewerId));
+  // `media=videos|photos` narrows by media kind; `videos=1` is its older spelling.
+  const mediaParam = url.searchParams.get("media");
+  const media: MediaFilter =
+    mediaParam === "videos" || mediaParam === "photos"
+      ? mediaParam
+      : url.searchParams.get("videos") === "1"
+        ? "videos"
+        : "all";
   const { items, nextCursor } = getFeed(
     scope,
     viewerId,
     after > 0 ? null : startCursor,
     limit,
     includeAdult,
-    url.searchParams.get("videos") === "1",
+    media,
     after > 0 ? after : null
   );
 

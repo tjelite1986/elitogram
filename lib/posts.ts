@@ -154,16 +154,19 @@ export type FeedScope =
   | { kind: "tag"; tag: string }
   | { kind: "liked" };
 
+export type MediaFilter = "all" | "videos" | "photos";
+
 // Cursor-paginated feed (newest first; cursor = last post id seen). Adult posts
-// are excluded unless includeAdult (the caller gates the 18+ PIN). videosOnly
-// narrows to posts that carry at least one video (the Videos tab).
+// are excluded unless includeAdult (the caller gates the 18+ PIN). media
+// narrows to posts that carry at least one video (the Videos tab, Explore's
+// Videos chip) or to posts that carry none (Explore's Photos chip).
 export function getFeed(
   scope: FeedScope,
   viewerId: number,
   cursor: number | null,
   limit = 12,
   includeAdult = false,
-  videosOnly = false,
+  media: MediaFilter = "all",
   // Backward pagination: the posts immediately NEWER than this id, for a feed
   // opened part-way down (?focus=) that has to be able to scroll back up.
   // Mutually exclusive with `cursor`, which walks the other way.
@@ -176,15 +179,12 @@ export function getFeed(
   // Ascending below, so this picks the ids immediately above `after` rather
   // than the newest overall; the page is flipped back to newest-first at the end.
   if (after !== null) q = q.where("p.id", ">", after);
-  if (videosOnly) {
-    q = q.where(
-      "p.id",
-      "in",
-      qb
-        .selectFrom("post_media")
-        .select("post_id")
-        .where("mime_type", "like", "video/%")
-    );
+  if (media !== "all") {
+    const videoPosts = qb
+      .selectFrom("post_media")
+      .select("post_id")
+      .where("mime_type", "like", "video/%");
+    q = q.where("p.id", media === "videos" ? "in" : "not in", videoPosts);
   }
 
   switch (scope.kind) {
