@@ -351,6 +351,25 @@ export function parseHashtags(caption: string | null): string[] {
   return tags;
 }
 
+// Every hashtag in the library with its live post count, most-used first.
+// Without 18+ access, posts behind the gate do not count and adult-only tags
+// disappear entirely — even the name is a leak. Shared by the /tags page
+// (which renders a capped slice) and /api/tags (which serves the full list).
+export function getTagIndex(includeAdult: boolean): { tag: string; count: number }[] {
+  let q = qb
+    .selectFrom("post_hashtags")
+    .innerJoin("posts", "posts.id", "post_hashtags.post_id")
+    .select((eb) => ["tag", eb.fn.countAll<number>().as("count")])
+    .where("posts.is_deleted", "=", 0)
+    .groupBy("tag")
+    .orderBy("count", "desc")
+    .orderBy("tag");
+  if (!includeAdult) {
+    q = q.where("posts.is_adult", "=", 0);
+  }
+  return getAll<{ tag: string; count: number }>(q);
+}
+
 export function isFollowing(
   followerId: number,
   targetType: AuthorType,

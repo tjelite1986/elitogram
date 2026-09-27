@@ -1,33 +1,25 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { loginUrl } from "@/lib/sso";
 import { has18Access } from "@/lib/adult-gate";
-import { qb, getAll } from "@/lib/kysely";
+import { getTagIndex } from "@/lib/posts";
+import TagIndex from "@/components/tag-index";
 
 export const dynamic = "force-dynamic";
 
-// Tag index: every hashtag in the library with its live post count, most-used
-// first. Search only surfaces a tag you already know to type; this is the
-// browsable version. Without 18+ access, posts behind the gate do not count
-// and adult-only tags disappear entirely — even the name is a leak.
+// Tag index: hashtags with their live post counts, most-used first. Search
+// only surfaces a tag you already know to type; this is the browsable
+// version. The page renders the top slice and the client loads the long tail
+// on demand — all ~1800 tags server-rendered cost 831 kB (each chip appears
+// in both the HTML and the RSC payload), and the tail is mostly count-1 tags.
+const PAGE_CAP = 150;
+
 export default async function TagsPage() {
   const session = await getSession();
   if (!session) redirect(loginUrl());
   const adult = await has18Access();
 
-  let q = qb
-    .selectFrom("post_hashtags")
-    .innerJoin("posts", "posts.id", "post_hashtags.post_id")
-    .select((eb) => ["tag", eb.fn.countAll<number>().as("count")])
-    .where("posts.is_deleted", "=", 0)
-    .groupBy("tag")
-    .orderBy("count", "desc")
-    .orderBy("tag");
-  if (!adult) {
-    q = q.where("posts.is_adult", "=", 0);
-  }
-  const tags = getAll<{ tag: string; count: number }>(q);
+  const tags = getTagIndex(adult);
 
   return (
     <div className="mx-auto max-w-4xl px-3 pb-24 pt-6 text-white">
@@ -39,17 +31,7 @@ export default async function TagsPage() {
           No tags yet.
         </p>
       ) : (
-        <div className="flex flex-wrap gap-2">
-          {tags.map((t) => (
-            <Link
-              key={t.tag}
-              href={`/tag/${encodeURIComponent(t.tag)}`}
-              className="rounded-full bg-white/5 px-3 py-1.5 text-sm transition hover:bg-white/15"
-            >
-              #{t.tag} <span className="text-white/40">{t.count}</span>
-            </Link>
-          ))}
-        </div>
+        <TagIndex initial={tags.slice(0, PAGE_CAP)} total={tags.length} />
       )}
     </div>
   );
