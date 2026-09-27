@@ -478,18 +478,13 @@ function processVideo(username, srcPath, originalName) {
     makeVideoPoster(finalPath, thumbPath);
     const { width, height } = videoDimensions(finalPath);
 
-    if (!consume(srcPath)) {
-      try { fs.unlinkSync(finalPath); } catch {}
-      try { fs.unlinkSync(thumbPath); } catch {}
-      log(`skip video ${originalName}: can't consume source`);
-      skipped++;
-      return;
-    }
-
-    consumeSidecar(srcPath);
+    // The source is consumed only after this item's DB rows exist (see the
+    // grouping loop) — a kill before then leaves a re-importable drop instead
+    // of files the app can never see.
     if (!byCreator.has(creatorId)) byCreator.set(creatorId, []);
     byCreator.get(creatorId).push({
       file: originalName,
+      srcPath,
       storageKey,
       mime: finalExt === "webm" ? "video/webm" : "video/mp4",
       width,
@@ -556,21 +551,13 @@ async function processImage(username, srcPath, originalName) {
       .jpeg({ quality: 75 })
       .toFile(thumbPath);
 
-    // Consume the source FIRST. If we can't delete it (e.g. a host-owned drop
-    // the container can't unlink), back out the files we just wrote and skip —
-    // otherwise the leftover source re-imports as a duplicate on the next run.
-    if (!consume(srcPath)) {
-      try { fs.unlinkSync(displayPath); } catch {}
-      try { fs.unlinkSync(thumbPath); } catch {}
-      log(`skip ${originalName}: can't consume source`);
-      skipped++;
-      return;
-    }
-
-    consumeSidecar(srcPath);
+    // The source is consumed only after this item's DB rows exist (see the
+    // grouping loop) — a kill before then leaves a re-importable drop instead
+    // of files the app can never see.
     if (!byCreator.has(creatorId)) byCreator.set(creatorId, []);
     byCreator.get(creatorId).push({
       file: originalName,
+      srcPath,
       storageKey,
       width: meta.width ?? null,
       height: meta.height ?? null,
@@ -649,8 +636,6 @@ for (const entry of entries) {
           skipped++;
         }
       }
-      // Remove the now-consumed folder (best effort).
-      if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
     } catch (err) {
       log(`skip folder ${entry.name}: ${err.message}`);
     }
@@ -659,17 +644,37 @@ for (const entry of entries) {
 
 // Group each creator's images into carousel posts (by IG shortcode, else date),
 // carrying the caption + hashtags from the gallery-dl metadata sidecar.
+const insertGroup = db.transaction((creatorId, group, cap) => {
+  const postId = Number(insertPost.run(creatorId, cap).lastInsertRowid);
+  group.forEach((m, i) =>
+    insertMedia.run(postId, m.storageKey, m.mime || "image/jpeg", m.width, m.height, i, m.contentHash)
+  );
+  if (cap) for (const tag of parseHashtags(cap)) insertHashtag.run(postId, tag);
+});
+
 for (const [creatorId, items] of byCreator) {
   items.sort((a, b) => a.file.localeCompare(b.file));
   for (const group of groupItems(items)) {
     const caption = group.find((m) => m.caption)?.caption ?? null;
-    const cap = caption ? caption.slice(0, 2200) : null;
-    const postId = Number(insertPost.run(creatorId, cap).lastInsertRowid);
-    group.forEach((m, i) =>
-      insertMedia.run(postId, m.storageKey, m.mime || "image/jpeg", m.width, m.height, i, m.contentHash)
-    );
-    if (cap) for (const tag of parseHashtags(cap)) insertHashtag.run(postId, tag);
+    insertGroup(creatorId, group, caption ? caption.slice(0, 2200) : null);
+    // Only now is the drop safe to delete. A source that can't be unlinked
+    // (host-owned) stays behind: the next run dedups it against the rows just
+    // inserted and retries the delete there.
+    for (const m of group) {
+      if (consume(m.srcPath)) consumeSidecar(m.srcPath);
+      else log(`imported ${m.file} but could not delete the source; next run dedups it`);
+    }
   }
+}
+
+// Creator subfolders still held their drops during the walk (consumption waits
+// for the insert), so empty ones are removed here instead (best effort).
+for (const entry of entries) {
+  if (!entry.isDirectory()) continue;
+  const dir = path.join(IMPORT_DIR, entry.name);
+  try {
+    if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+  } catch { /* best effort */ }
 }
 
 log(
