@@ -1,6 +1,7 @@
 import { db, UserProfileRow } from "./db";
 import { qb, getOne, getAll } from "./kysely";
 import { safeHttpUrl } from "./url";
+import { invalidatePeopleDirectory } from "./people-cache";
 
 // Shared public-profile layer (username/avatar/bio), 1:1 with users. The posts
 // module attributes by these instead of splitting the email; other modules can
@@ -88,6 +89,7 @@ export function setUsername(userId: number, username: string): string | null {
     u,
     userId
   );
+  invalidatePeopleDirectory();
   return null;
 }
 
@@ -110,6 +112,7 @@ export function setProfileFields(
   db.prepare(
     `UPDATE user_profiles SET ${sets.join(", ")} WHERE user_id = ?`
   ).run(...values);
+  invalidatePeopleDirectory();
 }
 
 export function setAvatarKey(userId: number, avatarKey: string): void {
@@ -117,6 +120,7 @@ export function setAvatarKey(userId: number, avatarKey: string): void {
     avatarKey,
     userId
   );
+  invalidatePeopleDirectory();
 }
 
 // Handle-scoped avatar (works for any identity type, incl. video-only creators
@@ -128,6 +132,7 @@ export function setHandleAvatar(handle: string, avatarKey: string): void {
      VALUES (?, ?, datetime('now'))
      ON CONFLICT(handle) DO UPDATE SET avatar_key = excluded.avatar_key, updated_at = datetime('now')`
   ).run(handle, avatarKey);
+  invalidatePeopleDirectory();
 }
 
 export function getHandleAvatar(handle: string): string | null {
@@ -284,6 +289,7 @@ function upsertExtras(handle: string, fields: Record<string, string | null>) {
        .map((k) => `${k} = excluded.${k}`)
        .join(", ")}, updated_at = datetime('now')`
   ).run(handle, ...keys.map((k) => fields[k]));
+  invalidatePeopleDirectory();
 }
 
 // Only http(s) links — reject javascript:/data: etc. (the url is rendered into

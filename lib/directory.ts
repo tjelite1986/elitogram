@@ -4,6 +4,7 @@ import { qb, getOne, getAll } from "./kysely";
 import { getProfileExtras, handlesWithAvatar, ProfileLink, ProfileField } from "./profiles";
 import { resolveBadges } from "./badges";
 import { getPrimaryHandle, personContentIds } from "./profile-links";
+import { getCachedPeople, setCachedPeople } from "./people-cache";
 
 // A badge as sent to the client — the BadgeDef's `earned` predicate is dropped
 // (a function prop would break server→client serialization).
@@ -303,6 +304,17 @@ export function resolvePerson(
   };
 }
 
+// The built, sorted directory is cached (lib/people-cache.ts) keyed by the two
+// inputs that change its contents (include18) and its order (sort). One scroll
+// to the bottom of /people is ~52 pages of 30, and the build was identical for
+// every one of them — with better-sqlite3 being synchronous, each rebuild
+// blocked every other request. q/filters/slice stay per-request on top of the
+// cached array (filter() copies, so the cached list is never mutated). The
+// list only changes when an importer, poller or avatar/profile write lands:
+// 10 s of staleness is invisible there, and writes inside this process call
+// invalidatePeopleDirectory() to skip even that.
+const PEOPLE_CACHE_TTL_MS = 10_000;
+
 export function getPeople(
   opts: {
     q?: string;
@@ -314,6 +326,33 @@ export function getPeople(
   const include18 = Boolean(opts.include18);
   const sort: PeopleSort = opts.sort || "relevance";
   const filters = opts.filters || [];
+
+  const key = `${include18}|${sort}`;
+  let list = getCachedPeople<PersonEntry[]>(key, PEOPLE_CACHE_TTL_MS);
+  if (!list) {
+    list = buildPeople(include18, sort);
+    setCachedPeople(key, list);
+  }
+
+  const q = (opts.q || "").trim().toLowerCase();
+  if (q) {
+    list = list.filter(
+      (p) =>
+        p.handle.toLowerCase().includes(q) ||
+        (p.displayName || "").toLowerCase().includes(q)
+    );
+  }
+
+  // Multi-select conditions: every selected filter must match (AND).
+  for (const f of filters) {
+    const pred = FILTER_PREDICATES[f];
+    if (pred) list = list.filter(pred);
+  }
+
+  return list;
+}
+
+function buildPeople(include18: boolean, sort: PeopleSort): PersonEntry[] {
   const people = new Map<string, PersonEntry>();
 
   // Handles that have a chosen avatar (handle_avatars takes precedence over the
@@ -461,28 +500,13 @@ export function getPeople(
   // hiding it made the saving look like it had failed. `hasProfileOnly` is left
   // set only while there is nothing to show, so the mark disappears by itself
   // once the first post lands.
-  let list = Array.from(people.values()).filter((p) => {
+  const list = Array.from(people.values()).filter((p) => {
     const visible =
       p.photos > 0;
     if (visible) p.hasProfileOnly = false;
     else if (p.hasAvatar) p.hasProfileOnly = true;
     return p.userId !== null || visible || p.hasProfileOnly;
   });
-
-  const q = (opts.q || "").trim().toLowerCase();
-  if (q) {
-    list = list.filter(
-      (p) =>
-        p.handle.toLowerCase().includes(q) ||
-        (p.displayName || "").toLowerCase().includes(q)
-    );
-  }
-
-  // Multi-select conditions: every selected filter must match (AND).
-  for (const f of filters) {
-    const pred = FILTER_PREDICATES[f];
-    if (pred) list = list.filter(pred);
-  }
 
   const byName = (a: PersonEntry, b: PersonEntry) =>
     (a.displayName || a.handle).localeCompare(b.displayName || b.handle);
