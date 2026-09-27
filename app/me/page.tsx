@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { loginUrl } from "@/lib/sso";
 import { ensureUserProfile } from "@/lib/profiles";
+import { handleOf } from "@/lib/directory";
 
 export const dynamic = "force-dynamic";
 
@@ -10,5 +11,5 @@ export default async function PostsMePage() {
   const session = await getSession();
   if (!session) redirect(loginUrl());
   const profile = ensureUserProfile(Number(session.sub), session.email);
-  redirect(`/u/${profile.username}`);
+  redirect(`/people/${encodeURIComponent(handleOf(profile.username))}?tab=photos`);
 }

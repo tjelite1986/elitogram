@@ -28,7 +28,6 @@ export interface PersonEntry {
   displayName: string | null;
   userId: number | null; // real app user (vs mirrored creator)
   photos: number; // visible post count (adult filtered unless include18)
-  photosHref: string | null;
   hasAvatar: boolean; // any avatar set (handle_avatars or legacy columns)
   /**
    * A creator with a picture or a bio but nothing to show yet — a profile that
@@ -87,7 +86,6 @@ function blank(handle: string): PersonEntry {
     displayName: null,
     userId: null,
     photos: 0,
-    photosHref: null,
     hasAvatar: false,
     hasProfileOnly: false,
     createdAt: null,
@@ -421,7 +419,6 @@ function buildPeople(include18: boolean, sort: PeopleSort): PersonEntry[] {
     p.displayName = u.display_name;
     p.userId = u.user_id;
     p.photos += u.photos;
-    p.photosHref = `/u/${u.username}`;
     if (u.avatar_key) p.hasAvatar = true;
     p.createdAt = earliest(p.createdAt, u.created_at);
   }
@@ -456,7 +453,6 @@ function buildPeople(include18: boolean, sort: PeopleSort): PersonEntry[] {
     if (!p.userId) {
       if (!p.displayName) p.displayName = c.display_name;
       p.photos += c.photos;
-      if (c.photos > 0) p.photosHref = `/u/${c.username}`;
     }
   }
 
@@ -486,7 +482,6 @@ function buildPeople(include18: boolean, sort: PeopleSort): PersonEntry[] {
     target.photos += entry.photos;
     if (target.userId === null && entry.userId !== null) target.userId = entry.userId;
     if (!target.displayName && entry.displayName) target.displayName = entry.displayName;
-    if (!target.photosHref && entry.photosHref) target.photosHref = entry.photosHref;
     if (entry.hasAvatar) target.hasAvatar = true;
     if (entry.hasInstagram) target.hasInstagram = true;
     if (entry.hasTiktok) target.hasTiktok = true;

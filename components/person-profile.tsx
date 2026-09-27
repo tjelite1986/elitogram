@@ -36,6 +36,7 @@ import ProfileBadges from "@/components/profile-badges";
 import FollowButton from "@/components/follow-button";
 import PostViews from "@/components/post-views";
 import PostGrid from "@/components/post-grid";
+import OwnPostsManager from "@/components/own-posts-manager";
 import ProfileMergeButton from "@/components/profile-merge-button";
 import ProfileInstagramSync from "@/components/profile-instagram-sync";
 import ProfileTiktokSync from "@/components/profile-tiktok-sync";
@@ -195,9 +196,6 @@ export default function PersonProfile({
                 User
               </span>
             )}
-          </div>
-          <div className="mt-3 flex max-w-sm justify-between">
-            <Stat value={person.photos} label="photos" />
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
             {!person.isOwn &&
@@ -422,15 +420,21 @@ export default function PersonProfile({
             </div>
           )}
 
-          {tab === "photos" && (
-            <PostViews
-              query={personQuery}
-              empty="No photos yet."
-              viewer={{ userId: viewerId, isAdmin }}
-              storageKey="posts-view-profile"
-              restoreKey={`profile:${person.handle}:posts`}
-            />
-          )}
+          {tab === "photos" &&
+            (person.isOwn && person.userId !== null ? (
+              // The owner's Photos tab is also the management surface: the
+              // post-stacking tool (select singles → merge into a carousel)
+              // lives here, moved from the retired /u profile page.
+              <OwnPostsManager userId={person.userId} />
+            ) : (
+              <PostViews
+                query={personQuery}
+                empty="No photos yet."
+                viewer={{ userId: viewerId, isAdmin }}
+                storageKey="posts-view-profile"
+                restoreKey={`profile:${person.handle}:posts`}
+              />
+            ))}
         </>
       )}
 

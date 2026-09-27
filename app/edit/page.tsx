@@ -4,6 +4,7 @@ import { ChevronLeft } from "lucide-react";
 import { getSession } from "@/lib/auth";
 import { loginUrl } from "@/lib/sso";
 import { ensureUserProfile } from "@/lib/profiles";
+import { handleOf } from "@/lib/directory";
 import PostProfileEditor from "@/components/post-profile-editor";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +19,7 @@ export default async function PostsEditProfilePage() {
     <div className="mx-auto max-w-md px-4 pb-24 pt-6 text-white">
       <div className="mb-4 flex items-center gap-2">
         <Link
-          href={`/u/${profile.username}`}
+          href={`/people/${encodeURIComponent(handleOf(profile.username))}`}
           className="inline-flex items-center gap-1 text-sm text-white/60 hover:text-white"
         >
           <ChevronLeft size={16} /> Back
