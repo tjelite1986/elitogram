@@ -29,8 +29,8 @@ export default function PostCard({
   onPatch,
 }: {
   post: FeedPost;
-  // Single tap on a photo (index within the carousel) — opens the lightbox
-  // when the feed provides it. Double tap still likes.
+  // Tap on a photo (index within the carousel) — opens the lightbox
+  // when the feed provides it.
   onImageTap?: (photoIndex: number) => void;
   // Report like/comment-count changes back to the owning list so the lightbox
   // and the card stay in sync.
@@ -46,7 +46,6 @@ export default function PostCard({
   const captionRef = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState(0);
   const trackRef = useRef<HTMLDivElement>(null);
-  const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Follow list-level updates (a like made inside the lightbox, for instance).
   useEffect(() => {
@@ -99,24 +98,6 @@ export default function PostCard({
     } catch {
       /* keep optimistic */
     }
-  };
-
-  // Distinguish tap (open lightbox) from double-tap (like): delay the tap
-  // briefly and cancel it when a second tap lands.
-  const handleImageClick = (index: number) => {
-    if (!onImageTap) return;
-    if (tapTimer.current) return;
-    tapTimer.current = setTimeout(() => {
-      tapTimer.current = null;
-      onImageTap(index);
-    }, 250);
-  };
-  const handleImageDoubleClick = () => {
-    if (tapTimer.current) {
-      clearTimeout(tapTimer.current);
-      tapTimer.current = null;
-    }
-    if (!liked) toggleLike();
   };
 
   const onScroll = () => {
@@ -192,8 +173,7 @@ export default function PostCard({
                 alt=""
                 loading="lazy"
                 decoding="async"
-                onClick={() => handleImageClick(i)}
-                onDoubleClick={handleImageDoubleClick}
+                onClick={() => onImageTap?.(i)}
                 className="aspect-square w-full shrink-0 snap-center object-cover"
               />
             )
