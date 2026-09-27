@@ -14,13 +14,19 @@ interface Tag {
   tag: string;
   count: number;
 }
+interface PostHit {
+  id: number;
+  caption: string | null;
+  media_id: number | null;
+}
 
-// Search bar for accounts + hashtags (used at the top of Explore). Debounced;
-// shows a results panel while typing, otherwise renders nothing.
+// Search bar for accounts + hashtags + captions (used at the top of Explore).
+// Debounced; shows a results panel while typing, otherwise renders nothing.
 export default function PostSearch() {
   const [q, setQ] = useState("");
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
+  const [posts, setPosts] = useState<PostHit[]>([]);
   const [loading, setLoading] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -30,6 +36,7 @@ export default function PostSearch() {
     if (!term) {
       setAccounts([]);
       setTags([]);
+      setPosts([]);
       return;
     }
     setLoading(true);
@@ -40,6 +47,7 @@ export default function PostSearch() {
           const d = await res.json();
           setAccounts(d.accounts || []);
           setTags(d.tags || []);
+          setPosts(d.posts || []);
         }
       } finally {
         setLoading(false);
@@ -50,7 +58,7 @@ export default function PostSearch() {
     };
   }, [q]);
 
-  const hasResults = accounts.length > 0 || tags.length > 0;
+  const hasResults = accounts.length > 0 || tags.length > 0 || posts.length > 0;
 
   return (
     <div className="mb-4 px-2">
@@ -59,7 +67,7 @@ export default function PostSearch() {
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search people and #tags"
+          placeholder="Search people, #tags and captions"
           className="w-full bg-transparent text-sm text-white placeholder-white/40 focus:outline-none"
         />
       </div>
@@ -107,6 +115,30 @@ export default function PostSearch() {
                 <span className="block text-xs text-white/50">
                   {t.count} post{t.count === 1 ? "" : "s"}
                 </span>
+              </span>
+            </Link>
+          ))}
+          {posts.map((p) => (
+            <Link
+              key={`post-${p.id}`}
+              href={`/p/${p.id}`}
+              className="flex items-center gap-3 px-3 py-2.5 transition hover:bg-white/5"
+            >
+              {p.media_id ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={`/api/posts/media/${p.media_id}?size=thumb`}
+                  alt=""
+                  className="size-9 shrink-0 rounded-lg object-cover"
+                  loading="lazy"
+                />
+              ) : (
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-white/10 text-white/70">
+                  <Search size={16} />
+                </span>
+              )}
+              <span className="min-w-0 flex-1 truncate text-sm text-white/80">
+                {p.caption}
               </span>
             </Link>
           ))}
