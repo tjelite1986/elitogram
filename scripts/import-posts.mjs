@@ -708,11 +708,13 @@ const applyProfileRows = db.transaction((p, avatarKey) => {
 });
 
 // A replaced picture is deleted only when nothing else still points at it: the
-// same file can be shared by a handle row and a legacy avatar_key column.
+// same file can be shared by a handle row and a legacy avatar_key column, and
+// avatars/ also holds post media from an older import.
 const avatarStillUsed = db.prepare(
   `SELECT 1 FROM handle_avatars WHERE avatar_key = @key
    UNION ALL SELECT 1 FROM post_creators WHERE avatar_key = @key
-   UNION ALL SELECT 1 FROM user_profiles WHERE avatar_key = @key LIMIT 1`
+   UNION ALL SELECT 1 FROM user_profiles WHERE avatar_key = @key
+   UNION ALL SELECT 1 FROM post_media WHERE storage_key = @key LIMIT 1`
 );
 function deleteReplacedAvatar(key) {
   if (!key?.startsWith("avatars/") || avatarStillUsed.get({ key })) return;
