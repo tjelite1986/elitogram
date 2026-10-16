@@ -659,8 +659,10 @@ async function downloadAvatar(url) {
 
 // Mirrors applyToPeople in lib/instagram.ts — a creator gets name, bio, picture
 // and links; a real account only the picture — but lets failures surface, since
-// the drop is consumed only once this has written.
+// the drop is consumed only once this has written. Returns the picture the
+// new one replaced, for the caller to delete once the write has committed.
 const applyProfileRows = db.transaction((p, avatarKey) => {
+  let replacedKey = null;
   const isUser = db.prepare("SELECT 1 FROM user_profiles WHERE username = ?").get(p.username);
   if (!isUser) {
     const row = findCreator.get(p.username);
@@ -677,6 +679,7 @@ const applyProfileRows = db.transaction((p, avatarKey) => {
     }
   }
   if (avatarKey) {
+    replacedKey = db.prepare("SELECT avatar_key FROM handle_avatars WHERE handle = ?").get(p.username)?.avatar_key ?? null;
     db.prepare(
       `INSERT INTO handle_avatars (handle, avatar_key, updated_at) VALUES (?, ?, datetime('now'))
        ON CONFLICT(handle) DO UPDATE SET avatar_key = excluded.avatar_key, updated_at = excluded.updated_at`
@@ -701,7 +704,24 @@ const applyProfileRows = db.transaction((p, avatarKey) => {
        ON CONFLICT(handle) DO UPDATE SET links_json = excluded.links_json, updated_at = excluded.updated_at`
     ).run(p.username, JSON.stringify(links));
   }
+  return replacedKey;
 });
+
+// A replaced picture is deleted only when nothing else still points at it: the
+// same file can be shared by a handle row and a legacy avatar_key column.
+const avatarStillUsed = db.prepare(
+  `SELECT 1 FROM handle_avatars WHERE avatar_key = @key
+   UNION ALL SELECT 1 FROM post_creators WHERE avatar_key = @key
+   UNION ALL SELECT 1 FROM user_profiles WHERE avatar_key = @key LIMIT 1`
+);
+function deleteReplacedAvatar(key) {
+  if (!key?.startsWith("avatars/") || avatarStillUsed.get({ key })) return;
+  try {
+    fs.rmSync(path.join(POSTS_ROOT, key), { force: true });
+  } catch (err) {
+    log(`could not delete replaced picture ${key}: ${err.message}`);
+  }
+}
 
 // Returns true when fp was a profile drop (handled or deliberately left for a
 // retry), false when it is something else for the caller to deal with.
@@ -728,14 +748,16 @@ async function handleProfileDrop(fp, folderName) {
       log(`profile ${p.username}: ${err.message}; applying the text without it`);
     }
   }
+  let replacedKey;
   try {
-    applyProfileRows(p, avatarKey);
+    replacedKey = applyProfileRows(p, avatarKey);
   } catch (err) {
     if (avatarKey) fs.rmSync(path.join(POSTS_ROOT, avatarKey), { force: true });
     log(`profile ${p.username}: ${err.message}`);
     skipped++;
     return true;
   }
+  if (replacedKey && replacedKey !== avatarKey) deleteReplacedAvatar(replacedKey);
   profilesApplied++;
   log(`profile ~ ${p.username}: ${[p.displayName && "name", p.bio && "bio", avatarKey && "picture", p.links.length && "links"].filter(Boolean).join(", ") || "nothing new"}`);
   if (!consume(fp)) log(`applied ${name} but could not delete it; the next run applies it again`);
