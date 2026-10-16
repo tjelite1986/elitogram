@@ -9,6 +9,8 @@
 //        <creator>_<instagram-media-id>.jpg
 //   2. A subfolder named after the creator — e.g. _import/emarusova/ — whose
 //      images go to that creator regardless of their filenames (one level deep).
+// A lone <handle>.json with kind "profile" (the phone app's "Save profile")
+// sets that creator's name, bio, picture and links — see handleProfileDrop().
 // For each file the script resolves the creator, finds-or-creates a
 // post_creators row, transcodes a display JPG + square thumbnail (videos: a
 // faststart MP4 remux + poster frame) under <creator-slug>/, and deletes the
@@ -589,6 +591,157 @@ function isReservedCreator(username) {
   return RESERVED_CREATOR_NAMES.has(username) || username.startsWith("u_");
 }
 
+// --- Profile drops ------------------------------------------------------------
+// The phone app's "Save profile to server" writes a lone <handle>.json with
+// kind "profile": display name, bio, picture URL — read from its own session,
+// which is the only way to get them without Instagram answering 429. It has no
+// media beside it, so the media loop would never see it. The JSON's username
+// names the creator, else the drop folder, else the file name.
+let profilesApplied = 0;
+
+function readProfileDrop(fp, folderName) {
+  const base = path.basename(fp);
+  const stem = base.slice(0, base.length - path.extname(base).length);
+  // A sidecar that still has its media file is that file's business.
+  const paired = fs
+    .readdirSync(path.dirname(fp))
+    .some((n) => n !== base && n.slice(0, n.length - path.extname(n).length) === stem);
+  if (paired) return null;
+  let d;
+  try {
+    d = JSON.parse(fs.readFileSync(fp, "utf8"));
+  } catch {
+    return null;
+  }
+  // Post sidecars carry the same profile fields; only an explicit profile drop
+  // is consumed here, so an orphaned sidecar never loses its caption this way.
+  if (d?.kind !== "profile") return null;
+  const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const username = creatorUsername(str(d.username) ?? folderName ?? stem);
+  if (username === "unknown") return null;
+  return {
+    username,
+    displayName: str(d.full_name)?.slice(0, 100) ?? null,
+    bio: (str(d.bio) ?? str(d.biography))?.slice(0, 2000) ?? null,
+    avatarUrl: str(d.profile_pic_url),
+    links: Array.isArray(d.links) ? d.links.filter((l) => typeof l === "string") : [],
+  };
+}
+
+// Same shape lib/posts-storage.ts storeAvatar writes: avatars/<uuid>.jpg, a
+// square cover crop. Throws { permanent } so the caller can tell an expired
+// signed CDN URL (give up on the picture) from a network blip (retry the drop).
+async function downloadAvatar(url) {
+  if (!/^https:\/\//i.test(url)) throw Object.assign(new Error("picture URL is not https"), { permanent: true });
+  let res;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+  } catch (err) {
+    throw new Error(`picture download failed: ${err.message}`);
+  }
+  if (!res.ok) {
+    // Instagram CDN URLs carry their expiry as hex seconds in `oe`; naming it
+    // tells an expired drop apart from a URL that was mangled on the way.
+    const oe = Number.parseInt(new URL(url).searchParams.get("oe") ?? "", 16);
+    const expiry = Number.isFinite(oe) ? `, URL expires ${new Date(oe * 1000).toISOString()}` : "";
+    throw Object.assign(new Error(`picture download failed (${res.status}${expiry})`), {
+      permanent: res.status >= 400 && res.status < 500,
+    });
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length < 512) throw Object.assign(new Error("picture too small to be real"), { permanent: true });
+  const dir = path.join(POSTS_ROOT, "avatars");
+  fs.mkdirSync(dir, { recursive: true });
+  const uuid = randomUUID();
+  await sharp(buf).rotate().resize(512, 512, { fit: "cover" }).jpeg({ quality: 82 }).toFile(path.join(dir, `${uuid}.jpg`));
+  return `avatars/${uuid}.jpg`;
+}
+
+// Mirrors applyToPeople in lib/instagram.ts — a creator gets name, bio, picture
+// and links; a real account only the picture — but lets failures surface, since
+// the drop is consumed only once this has written.
+const applyProfileRows = db.transaction((p, avatarKey) => {
+  const isUser = db.prepare("SELECT 1 FROM user_profiles WHERE username = ?").get(p.username);
+  if (!isUser) {
+    const row = findCreator.get(p.username);
+    if (row) {
+      db.prepare(
+        "UPDATE post_creators SET display_name = COALESCE(?, display_name), bio = COALESCE(?, bio) WHERE id = ?"
+      ).run(p.displayName, p.bio, row.id);
+    } else {
+      db.prepare(
+        "INSERT INTO post_creators (username, display_name, bio, source) VALUES (?, ?, ?, 'instagram')"
+      ).run(p.username, p.displayName ?? p.username, p.bio);
+      creatorsNew++;
+      log(`creator + ${p.username}`);
+    }
+  }
+  if (avatarKey) {
+    db.prepare(
+      `INSERT INTO handle_avatars (handle, avatar_key, updated_at) VALUES (?, ?, datetime('now'))
+       ON CONFLICT(handle) DO UPDATE SET avatar_key = excluded.avatar_key, updated_at = excluded.updated_at`
+    ).run(p.username, avatarKey);
+  }
+  if (p.links.length) {
+    const ex = db.prepare("SELECT links_json FROM profile_extras WHERE handle = ?").get(p.username);
+    let links = [];
+    try {
+      const parsed = ex?.links_json ? JSON.parse(ex.links_json) : [];
+      if (Array.isArray(parsed)) links = parsed.filter((l) => l && typeof l.url === "string");
+    } catch { /* bad json -> start fresh */ }
+    const seen = new Set(links.map((l) => l.url));
+    for (const raw of p.links) {
+      const url = raw.trim().slice(0, 300);
+      if (!/^https?:\/\//i.test(url) || seen.has(url) || links.length >= 10) continue;
+      seen.add(url);
+      links.push({ label: "", url });
+    }
+    db.prepare(
+      `INSERT INTO profile_extras (handle, links_json, updated_at) VALUES (?, ?, datetime('now'))
+       ON CONFLICT(handle) DO UPDATE SET links_json = excluded.links_json, updated_at = excluded.updated_at`
+    ).run(p.username, JSON.stringify(links));
+  }
+});
+
+// Returns true when fp was a profile drop (handled or deliberately left for a
+// retry), false when it is something else for the caller to deal with.
+async function handleProfileDrop(fp, folderName) {
+  const p = readProfileDrop(fp, folderName);
+  if (!p) return false;
+  const name = path.basename(fp);
+  if (isReservedCreator(p.username)) {
+    log(`skip ${name}: creator name "${p.username}" is a reserved storage folder`);
+    skipped++;
+    return true;
+  }
+  let avatarKey = null;
+  if (p.avatarUrl) {
+    try {
+      avatarKey = await downloadAvatar(p.avatarUrl);
+    } catch (err) {
+      if (!err.permanent) {
+        // The signed URL may still be good: keep the drop for the next run.
+        log(`profile ${p.username}: ${err.message}; left for the next run`);
+        skipped++;
+        return true;
+      }
+      log(`profile ${p.username}: ${err.message}; applying the text without it`);
+    }
+  }
+  try {
+    applyProfileRows(p, avatarKey);
+  } catch (err) {
+    if (avatarKey) fs.rmSync(path.join(POSTS_ROOT, avatarKey), { force: true });
+    log(`profile ${p.username}: ${err.message}`);
+    skipped++;
+    return true;
+  }
+  profilesApplied++;
+  log(`profile ~ ${p.username}: ${[p.displayName && "name", p.bio && "bio", avatarKey && "picture", p.links.length && "links"].filter(Boolean).join(", ") || "nothing new"}`);
+  if (!consume(fp)) log(`applied ${name} but could not delete it; the next run applies it again`);
+  return true;
+}
+
 // Dispatch a single file: images and videos both become post media (videos
 // surface under the posts Videos tab), anything else is ignored.
 async function handleFile(username, srcPath, originalName) {
@@ -610,6 +763,10 @@ for (const entry of entries) {
   if (entry.isFile()) {
     // Top-level file: the creator is encoded in the filename.
     const stem = entry.name.slice(0, entry.name.length - path.extname(entry.name).length);
+    if (entry.name.toLowerCase().endsWith(".json")) {
+      await handleProfileDrop(path.join(IMPORT_DIR, entry.name), null);
+      continue;
+    }
     await handleFile(creatorUsername(parseCreator(stem)), path.join(IMPORT_DIR, entry.name), entry.name);
   } else if (entry.isDirectory()) {
     // Subfolder: the FOLDER NAME is the creator; every image inside goes to it
@@ -627,8 +784,16 @@ for (const entry of entries) {
         // Metadata sidecars ride along with their media file and are consumed
         // with it — by the time this listing reaches one it is usually gone.
         // Skipping them here keeps the ENOENT out of the skipped count.
-        if (f.toLowerCase().endsWith(".json")) continue;
+        // The one exception is a profile drop, which has no media of its own.
         const fp = path.join(dir, f);
+        if (f.toLowerCase().endsWith(".json")) {
+          try {
+            await handleProfileDrop(fp, entry.name);
+          } catch (err) {
+            log(`skip ${entry.name}/${f}: ${err.message}`);
+          }
+          continue;
+        }
         try {
           if (fs.statSync(fp).isFile()) await handleFile(username, fp, f);
         } catch (err) {
@@ -680,7 +845,7 @@ for (const entry of entries) {
 log(
   `done: ${imported} imported, ${creatorsNew} new creators, ` +
     `${videosImported} videos, ${deduped} dup-skipped, ${replaced} meta-updated, ` +
-    `${skipped} skipped`
+    `${profilesApplied} profiles, ${skipped} skipped`
 );
-result({ imported, creatorsNew, videosImported, deduped, replaced, skipped });
+result({ imported, creatorsNew, videosImported, deduped, replaced, profilesApplied, skipped });
 db.close();
