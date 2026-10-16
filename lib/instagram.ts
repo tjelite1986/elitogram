@@ -11,7 +11,7 @@ const execFileAsync = promisify(execFile);
 import { db } from "./db";
 import { qb, getOne, getAll } from "./kysely";
 import { handleOf } from "./directory";
-import { setProfileInstagram } from "./profiles";
+import { setHandleAvatar, setProfileInstagram } from "./profiles";
 import { storeAvatar, isReservedAuthorName } from "./posts-storage";
 import { safeHttpUrl } from "./url";
 
@@ -483,11 +483,7 @@ export async function applyToPeople(
       const buf = await downloadToBuffer(meta.avatarUrl);
       if (buf && buf.length > 0) {
         const key = await storeAvatar("avatar.jpg", "image/jpeg", buf);
-        db.prepare(
-          `INSERT INTO handle_avatars (handle, avatar_key, updated_at)
-           VALUES (?, ?, datetime('now'))
-           ON CONFLICT(handle) DO UPDATE SET avatar_key = excluded.avatar_key, updated_at = excluded.updated_at`
-        ).run(handle, key);
+        setHandleAvatar(handle, key);
       }
     }
 

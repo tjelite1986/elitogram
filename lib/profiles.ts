@@ -1,7 +1,9 @@
+import fs from "node:fs";
 import { db, UserProfileRow } from "./db";
 import { qb, getOne, getAll } from "./kysely";
 import { safeHttpUrl } from "./url";
 import { invalidatePeopleDirectory } from "./people-cache";
+import { AVATARS_SUBDIR, avatarPathFor } from "./posts-storage";
 
 // Shared public-profile layer (username/avatar/bio), 1:1 with users. The posts
 // module attributes by these instead of splitting the email; other modules can
@@ -115,24 +117,51 @@ export function setProfileFields(
   invalidatePeopleDirectory();
 }
 
+// A replaced picture is deleted once nothing points at it any more: the same
+// file can sit in a handle row and a legacy avatar_key column at once, and
+// avatars/ also holds post media from an older import.
+function deleteReplacedAvatar(oldKey: string | null | undefined, newKey: string): void {
+  if (!oldKey || oldKey === newKey || !oldKey.startsWith(`${AVATARS_SUBDIR}/`)) return;
+  const stillUsed = db
+    .prepare(
+      `SELECT 1 FROM handle_avatars WHERE avatar_key = @key
+       UNION ALL SELECT 1 FROM post_creators WHERE avatar_key = @key
+       UNION ALL SELECT 1 FROM user_profiles WHERE avatar_key = @key
+       UNION ALL SELECT 1 FROM post_media WHERE storage_key = @key LIMIT 1`
+    )
+    .get({ key: oldKey });
+  if (stillUsed) return;
+  try {
+    fs.rmSync(avatarPathFor(oldKey), { force: true });
+  } catch (err) {
+    console.error(`[profiles] could not delete replaced avatar ${oldKey}:`, err);
+  }
+}
+
 export function setAvatarKey(userId: number, avatarKey: string): void {
+  const old = db
+    .prepare("SELECT avatar_key FROM user_profiles WHERE user_id = ?")
+    .get(userId) as { avatar_key: string | null } | undefined;
   db.prepare("UPDATE user_profiles SET avatar_key = ? WHERE user_id = ?").run(
     avatarKey,
     userId
   );
   invalidatePeopleDirectory();
+  deleteReplacedAvatar(old?.avatar_key, avatarKey);
 }
 
 // Handle-scoped avatar (works for any identity type, incl. video-only creators
 // with no post_creators row). Takes precedence over the legacy avatar_key
 // columns in the avatar route.
 export function setHandleAvatar(handle: string, avatarKey: string): void {
+  const old = getHandleAvatar(handle);
   db.prepare(
     `INSERT INTO handle_avatars (handle, avatar_key, updated_at)
      VALUES (?, ?, datetime('now'))
      ON CONFLICT(handle) DO UPDATE SET avatar_key = excluded.avatar_key, updated_at = datetime('now')`
   ).run(handle, avatarKey);
   invalidatePeopleDirectory();
+  deleteReplacedAvatar(old, avatarKey);
 }
 
 export function getHandleAvatar(handle: string): string | null {
