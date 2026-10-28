@@ -13,6 +13,7 @@
   --radius: 10px;
   --rail: 244px;
   --bottom-nav: 52px;
+  --rail-bg: #f3f3f3;
   color-scheme: light;
 }
 
@@ -25,6 +26,7 @@
     --text: #f5f5f5;
     --muted: #a8a8a8;
     --accent: #0095f6;
+    --rail-bg: #161616;
     color-scheme: dark;
   }
 }
@@ -115,7 +117,7 @@ label { display: block; }
   .main { margin-left: 72px; padding-bottom: 0; }
   .rail {
     display: flex; flex-direction: column; position: fixed; inset: 0 auto 0 0; width: 72px; z-index: 30;
-    padding: 20px 12px; border-right: 1px solid var(--border); background: var(--bg); gap: 4px;
+    padding: 20px 12px; border-right: 1px solid var(--border); background: var(--rail-bg); gap: 4px;
   }
   .rail .brand { display: none; height: 60px; padding: 8px 12px; }
   .rail .brand-icon { padding: 12px; margin-bottom: 18px; display: flex; }
@@ -125,6 +127,13 @@ label { display: block; }
   }
   .rail a:hover, .rail button.rail-item:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
   .rail .rail-label { display: none; font-size: 16px; }
+  /* The label is hidden in the narrow rail, so the current page has to read from the icon row alone. */
+  .rail a.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+  .rail a.active:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  .rail a.active::before {
+    content: ''; position: absolute; left: -12px; top: 8px; bottom: 8px; width: 3px; border-radius: 0 3px 3px 0; background: var(--accent);
+  }
+  .rail a.active .avatar { box-shadow: 0 0 0 2px var(--accent); }
   .rail a.active .rail-label { font-weight: 700; }
   .rail .spacer { flex: 1; }
   .rail .badge-dot { top: 6px; left: 26px; right: auto; }
