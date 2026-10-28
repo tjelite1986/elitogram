@@ -1,8 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import type { Post } from '../api';
 import { Icon } from '../icons';
-import { Avatar, ClampedCaption, shouldIgnoreKey, useMuted } from '../ui';
+import { Avatar, ClampedCaption, shouldIgnoreKey, useMuted, usePager } from '../ui';
 import { Carousel } from './Carousel';
 import { authorLink, useLike } from './PostCard';
 
@@ -17,7 +17,7 @@ interface Props {
 // Posts further than this from the current one render as empty frames, so only a handful of originals load at once.
 const WINDOW = 2;
 
-/** Full-screen, vertically snapping view of a feed. Each post fills the screen; swipe sideways through its media. */
+/** Full-screen, vertically paged view of a feed. Each post fills the screen; swipe sideways through its media. */
 export function FeedViewer({ posts, start, more, done, onClose }: Props) {
   const self = useRef<HTMLDivElement>(null);
   const container = useRef<HTMLDivElement>(null);
@@ -26,13 +26,6 @@ export function FeedViewer({ posts, start, more, done, onClose }: Props) {
   activeRef.current = active;
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
-
-  useLayoutEffect(() => {
-    const c = container.current;
-    if (c) c.scrollTop = start * c.clientHeight;
-    // Only the opening position; later scrolling is the user's.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // The back button closes the viewer instead of leaving the feed.
   useEffect(() => {
@@ -49,18 +42,18 @@ export function FeedViewer({ posts, start, more, done, onClose }: Props) {
 
   const close = () => history.back();
 
-  const goTo = (i: number) => {
-    const c = container.current;
-    if (!c) return;
-    c.scrollTo({ top: Math.max(0, Math.min(posts.length - 1, i)) * c.clientHeight, behavior: 'smooth' });
-  };
+  const step = usePager(container, posts.length, { start, onPage: setActive });
+
+  useEffect(() => {
+    if (!done && active >= posts.length - 3) more();
+  }, [active, done, posts.length, more]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (shouldIgnoreKey(e, self.current)) return;
       if (e.key === 'Escape') close();
-      else if (e.key === 'ArrowDown' || e.key === 'j') goTo(activeRef.current + 1);
-      else if (e.key === 'ArrowUp' || e.key === 'k') goTo(activeRef.current - 1);
+      else if (e.key === 'ArrowDown' || e.key === 'j') step(1);
+      else if (e.key === 'ArrowUp' || e.key === 'k') step(-1);
       else return;
       e.preventDefault();
     };
@@ -68,25 +61,19 @@ export function FeedViewer({ posts, start, more, done, onClose }: Props) {
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  const onScroll = () => {
-    const c = container.current;
-    if (!c) return;
-    const i = Math.round(c.scrollTop / c.clientHeight);
-    if (i !== active) setActive(i);
-    if (!done && i >= posts.length - 3) more();
-  };
-
   return (
     <div className="feed-viewer" ref={self} data-modal="true" role="dialog" aria-label="Full screen feed">
       <button className="icon-btn feed-viewer-close" onClick={close} aria-label="Close">
         <Icon name="close" />
       </button>
-      <div className="reels" ref={container} onScroll={onScroll}>
-        {posts.map((p, i) => (
-          <section className="reel" key={p.id}>
-            {Math.abs(i - active) <= WINDOW && <ViewerPost post={p} active={i === active} dialog={self} />}
-          </section>
-        ))}
+      <div className="reels" ref={container}>
+        <div className="reels-track">
+          {posts.map((p, i) => (
+            <section className="reel" key={p.id}>
+              {Math.abs(i - active) <= WINDOW && <ViewerPost post={p} active={i === active} dialog={self} />}
+            </section>
+          ))}
+        </div>
       </div>
     </div>
   );

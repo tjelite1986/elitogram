@@ -13,6 +13,10 @@ export function Feed() {
   const { reload } = feed;
   const [viewer, setViewer] = useState<number | null>(null);
   useEffect(() => {
+    document.documentElement.classList.add('snap-posts');
+    return () => document.documentElement.classList.remove('snap-posts');
+  }, []);
+  useEffect(() => {
     window.addEventListener('eg-adult', reload);
     return () => window.removeEventListener('eg-adult', reload);
   }, [reload]);

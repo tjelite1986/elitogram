@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Post, Tile } from '../api';
 import { Icon } from '../icons';
-import { Avatar, ClampedCaption, Sentinel, useInfinite, useMuted, usePageTitle } from '../ui';
+import { Avatar, ClampedCaption, useInfinite, useMuted, usePager, usePageTitle } from '../ui';
 import { authorLink, useLike } from '../components/PostCard';
 import { Grid } from '../components/Grid';
 
@@ -105,13 +105,11 @@ export function Videos() {
     }
   }, [mode]);
 
-  const onScroll = () => {
-    const c = container.current;
-    if (!c) return;
-    const i = Math.round(c.scrollTop / c.clientHeight);
-    if (i !== active) setActive(i);
-    if (i >= list.items.length - 3) list.more();
-  };
+  usePager(container, list.items.length, { onPage: setActive, enabled: mode === 'reels' });
+  const { more } = list;
+  useEffect(() => {
+    if (active >= list.items.length - 3) more();
+  }, [active, list.items.length, more]);
 
   const toggle = (
     <div className="reels-toggle row">
@@ -134,16 +132,17 @@ export function Videos() {
   return (
     <>
       {toggle}
-      <div className="reels" ref={container} onScroll={onScroll}>
-        {list.items.map((r, i) => (
-          <ReelItem key={r.media_id} reel={r} active={i === active} />
-        ))}
-        {!list.loading && list.done && list.items.length === 0 && (
-          <div className="empty" style={{ color: '#aaa', paddingTop: 120 }}>
-            No videos yet.
-          </div>
-        )}
-        <Sentinel onVisible={list.more} disabled={list.done} />
+      <div className="reels" ref={container}>
+        <div className="reels-track">
+          {list.items.map((r, i) => (
+            <ReelItem key={r.media_id} reel={r} active={i === active} />
+          ))}
+          {!list.loading && list.done && list.items.length === 0 && (
+            <div className="empty" style={{ color: '#aaa', paddingTop: 120 }}>
+              No videos yet.
+            </div>
+          )}
+        </div>
       </div>
     </>
   );

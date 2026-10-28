@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import { get, type Me, type Page } from './api';
 
@@ -321,6 +321,141 @@ export function useInfinite<T>(url: string | null) {
   }, [load]);
 
   return { items, setItems, loading, done, error, more, reload };
+}
+
+// --- Full-screen pager -------------------------------------------------------------
+
+// The move runs as a CSS transition on the compositor, so it stays smooth while React mounts the next items.
+const PAGE_EASE = 'transform 420ms cubic-bezier(0.22, 0.61, 0.36, 1)';
+// A swipe this far (share of the screen), or a flick this fast (px/ms), turns the page.
+const SWIPE_SHARE = 0.18;
+const FLICK_SPEED = 0.35;
+// Wheel events closer together than this belong to one gesture, trackpad inertia included.
+const WHEEL_GAP_MS = 220;
+
+/** An element between `from` and `root` that scrolls vertically on its own, e.g. an opened caption. */
+function innerScroller(from: EventTarget | null, root: HTMLElement): HTMLElement | null {
+  for (let el = from as HTMLElement | null; el && el !== root; el = el.parentElement) {
+    if (el.scrollHeight > el.clientHeight && /auto|scroll/.test(getComputedStyle(el).overflowY)) return el;
+  }
+  return null;
+}
+
+interface PagerOptions {
+  start?: number;
+  onPage: (i: number) => void;
+  enabled?: boolean;
+}
+
+/**
+ * Pages a full-screen vertical feed one item per gesture. Native snapping lets a hard flick run
+ * through a dozen items; here a swipe, a wheel gesture or a key press moves exactly one. The
+ * container does not scroll: its first child is the track, moved with a transform.
+ * Returns `step(±1)` for keyboard use.
+ */
+export function usePager(ref: RefObject<HTMLDivElement>, count: number, { start = 0, onPage, enabled = true }: PagerOptions) {
+  const countRef = useRef(count);
+  countRef.current = count;
+  const onPageRef = useRef(onPage);
+  onPageRef.current = onPage;
+  const page = useRef(start);
+
+  const place = useCallback(
+    (offset: number, animated: boolean) => {
+      const el = ref.current;
+      const track = el?.firstElementChild as HTMLElement | null;
+      if (!el || !track) return;
+      track.style.transition = animated ? PAGE_EASE : 'none';
+      track.style.transform = `translate3d(0, ${-page.current * el.clientHeight + offset}px, 0)`;
+    },
+    [ref],
+  );
+
+  const goTo = useCallback(
+    (i: number) => {
+      const to = Math.max(0, Math.min(countRef.current - 1, i));
+      const changed = to !== page.current;
+      page.current = to;
+      place(0, true);
+      if (changed) onPageRef.current(to);
+    },
+    [place],
+  );
+
+  const step = useCallback((d: number) => goTo(page.current + d), [goTo]);
+
+  // Layout effect, so a viewer opened mid-feed never paints the first item.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !enabled) return;
+    place(0, false);
+
+    let lastWheel = 0;
+    const onWheel = (e: WheelEvent) => {
+      // Sideways wheel moves a carousel; an opened caption scrolls itself.
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX) || innerScroller(e.target, el)) return;
+      e.preventDefault();
+      const now = performance.now();
+      const fresh = now - lastWheel > WHEEL_GAP_MS;
+      lastWheel = now;
+      if (fresh) step(Math.sign(e.deltaY));
+    };
+
+    let touch: { x: number; y: number; at: number; axis: 'x' | 'y' | null } | null = null;
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1 || innerScroller(e.target, el)) {
+        touch = null;
+        return;
+      }
+      const t = e.touches[0];
+      touch = { x: t.clientX, y: t.clientY, at: performance.now(), axis: null };
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!touch) return;
+      const t = e.touches[0];
+      const dx = t.clientX - touch.x;
+      const dy = t.clientY - touch.y;
+      if (!touch.axis) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 6) return;
+        touch.axis = Math.abs(dy) > Math.abs(dx) ? 'y' : 'x';
+      }
+      if (touch.axis !== 'y') return;
+      e.preventDefault();
+      // The finger drags the feed, but never further than the neighbouring item; the ends resist.
+      const h = el.clientHeight;
+      const atEnd = (dy > 0 && page.current === 0) || (dy < 0 && page.current >= countRef.current - 1);
+      place(Math.max(-h, Math.min(h, atEnd ? dy / 4 : dy)), false);
+    };
+    const onEnd = (e: TouchEvent) => {
+      if (!touch) return;
+      const { y, at, axis } = touch;
+      touch = null;
+      if (axis !== 'y') return;
+      const dy = (e.changedTouches[0]?.clientY ?? y) - y;
+      const speed = dy / Math.max(1, performance.now() - at);
+      const turn = Math.abs(dy) > el.clientHeight * SWIPE_SHARE || (Math.abs(dy) > 20 && Math.abs(speed) > FLICK_SPEED);
+      goTo(turn ? page.current - Math.sign(dy) : page.current);
+    };
+
+    const onResize = () => place(0, false);
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('touchstart', onStart, { passive: true });
+    el.addEventListener('touchmove', onMove, { passive: false });
+    el.addEventListener('touchend', onEnd);
+    el.addEventListener('touchcancel', onEnd);
+    window.addEventListener('resize', onResize);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('touchstart', onStart);
+      el.removeEventListener('touchmove', onMove);
+      el.removeEventListener('touchend', onEnd);
+      el.removeEventListener('touchcancel', onEnd);
+      window.removeEventListener('resize', onResize);
+    };
+  }, [ref, enabled, step, goTo, place]);
+
+  return step;
 }
 
 export function Sentinel({ onVisible, disabled }: { onVisible: () => void; disabled?: boolean }) {
