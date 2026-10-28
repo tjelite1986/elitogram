@@ -31,6 +31,8 @@ export function Carousel({ media, quality = 'feed', index, onIndex, onDoubleTap,
   const [current, setCurrent] = useState(index ?? 0);
   const [visible, setVisible] = useState(false);
   const [heart, setHeart] = useState(0);
+  // Paused by a tap; cleared when the slide or the carousel's visibility changes.
+  const [held, setHeld] = useState(false);
   const [muted, setMuted] = useMuted();
   const lastTap = useRef(0);
   const root = useRef<HTMLDivElement>(null);
@@ -48,14 +50,16 @@ export function Carousel({ media, quality = 'feed', index, onIndex, onDoubleTap,
     return () => io.disconnect();
   }, []);
 
+  useEffect(() => setHeld(false), [visible, current]);
+
   // Only the visible slide's video plays.
   useEffect(() => {
     track.current?.querySelectorAll('video').forEach((v, i) => {
       const slide = Number(v.dataset.slide ?? i);
-      if (visible && slide === current) void v.play().catch(() => undefined);
+      if (visible && slide === current && !held) void v.play().catch(() => undefined);
       else v.pause();
     });
-  }, [visible, current]);
+  }, [visible, current, held]);
 
   const onScroll = () => {
     const t = track.current;
@@ -83,9 +87,11 @@ export function Carousel({ media, quality = 'feed', index, onIndex, onDoubleTap,
       return;
     }
     lastTap.current = now;
-    if (onOpen) {
+    // Without native controls, a tap on a video is the only way to pause it.
+    const single = onOpen ? () => onOpen(i) : media[i]?.kind === 'video' && !controls ? () => setHeld((h) => !h) : null;
+    if (single) {
       const at = now;
-      setTimeout(() => lastTap.current === at && onOpen(i), onDoubleTap ? 300 : 0);
+      setTimeout(() => lastTap.current === at && single(), onDoubleTap ? 300 : 0);
     }
   };
 
@@ -142,6 +148,11 @@ export function Carousel({ media, quality = 'feed', index, onIndex, onDoubleTap,
         <button className="mute-btn" aria-label={muted ? 'Unmute' : 'Mute'} onClick={() => setMuted(!muted)}>
           <Icon name={muted ? 'muted' : 'sound'} />
         </button>
+      )}
+      {held && hasVideo && (
+        <div className="play-pop">
+          <Icon name="play" />
+        </div>
       )}
       {heart > 0 && (
         <div className="heart-pop" key={heart}>

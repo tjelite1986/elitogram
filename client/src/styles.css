@@ -209,6 +209,8 @@ label { display: block; }
 }
 .mute-btn .icon { width: 16px; height: 16px; }
 .heart-pop { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; z-index: 3; }
+.play-pop { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; z-index: 3; }
+.play-pop .icon { width: 72px; height: 72px; fill: rgba(255, 255, 255, 0.85); stroke: none; filter: drop-shadow(0 0 8px rgba(0,0,0,.5)); }
 .heart-pop .icon { width: 96px; height: 96px; fill: #fff; stroke: #fff; filter: drop-shadow(0 0 8px rgba(0,0,0,.4)); animation: pop 0.8s ease-out forwards; }
 @keyframes pop { 0% { transform: scale(0.2); opacity: 0; } 20% { transform: scale(1.1); opacity: 1; } 70% { opacity: 1; } 100% { transform: scale(1); opacity: 0; } }
 
@@ -313,6 +315,8 @@ label { display: block; }
 .viewer-action:hover { background: rgba(255, 255, 255, 0.12); }
 .viewer-action .icon { width: 26px; height: 26px; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6)); }
 .feed-viewer .mute-btn { display: none; }
+/* The reels page paints videos black; here the blurred fill should show through the letterbox. */
+.feed-viewer .reel video { background: none; }
 .feed-viewer .caption a.tag, .feed-viewer .caption a.mention { color: #e0f1ff; }
 .feed-viewer .dots { top: 16px; bottom: auto !important; }
 .reels-toggle { position: fixed; top: 12px; right: 12px; z-index: 40; }
