@@ -1,182 +1,75 @@
 # Elitogram
 
-A photo-and-video feed: posts with carousels, creators and the people behind
-them, 24-hour stories, hashtags, a drop folder, Instagram and TikTok pollers and
-a duplicate scanner.
+A private, self-hosted photo and video feed for one household. One container:
+Express + SQLite serving a React single-page app, with a built-in scheduler for
+imports, Instagram/TikTok syncs, duplicate scans, cleanup and nightly backups.
 
-It was the `/posts` section of
-[elite-v2](https://github.com/tjelite1986/elite-v2) until 2026-09-16, when the
-library — the feed, the people directory, both syncs and the profile layer that
-describes them — was extracted into this app. elite-v2 keeps the accounts and
-redirects every old link here.
+## Run
 
-Nothing here names the machine it runs on: the hostnames, the media root and the
-address of the app it borrows its login from all come from the environment.
-
----
-
-## What it is
-
-| | |
-|---|---|
-| Stack | Next 15 (App Router), React 19, Tailwind, better-sqlite3 + Kysely |
-| Database | one SQLite file, `DATA_DIR/elitogram.db` |
-| Media | on disk, under `POSTS_ROOT` — never in the database |
-| Accounts | none of its own; sign-in is elite-v2's (see [Sign-in](#sign-in)) |
-| Dev | `npm run dev` → :3021 |
-
-### Pages
-
-| Path | |
-|---|---|
-| `/` | the feed |
-| `/explore` | the whole library as a grid |
-| `/videos` | the library's clips, as an immersive feed or a grid |
-| `/p/<id>` | one post |
-| `/people`, `/people/<handle>` | the directory, and one person's profile |
-| `/people/<handle>/edit` | that person's display name, bio, links and sources |
-| `/u/<username>` | one account's own posts (`/me` redirects here) |
-| `/tag/<tag>` | a hashtag as a grid |
-| `/create`, `/edit` | post, and edit what you posted |
-| `/settings` | Import, Duplicates, Cleaning, Profiles, Sources, 18+ access, Background jobs |
-
----
-
-## Sign-in
-
-There are no accounts here. elite-v2 scopes its session cookie to the parent
-domain, so a browser signed in there arrives here already signed in; the token
-behind that cookie is posted to elite-v2's `POST /api/auth/verify`
-(`ELITE_VERIFY_URL`, over the internal network) and comes back as the account's
-id, email, role, username, display name and avatar URL.
-
-Verifying the signature locally would need elite-v2's `JWT_SECRET` and would
-still accept a session that had been revoked — that row is in elite-v2's
-database. So the token goes back to be resolved, and the secret never leaves the
-app that owns it (`lib/sso.ts`).
-
-Accounts that have signed in are mirrored into a local `users` table, keyed by
-**elite-v2's own id** — the same integer the migrated rows already carry, so a
-like or a comment written before the split still points at the right person.
-
-`GATE_SECRET` is this app's only key of its own. It signs the 18+ unlock cookie
-and nothing else; it is deliberately not elite-v2's `JWT_SECRET`.
-
----
-
-## The library on disk
-
-One tree, one owner, under `POSTS_ROOT`:
-
-```
-<POSTS_ROOT>/
-  <creator>/            one folder per creator the library is filed under
-  _import/              the shared drop folder (the posts-import job sweeps it)
-  u_<user>/posts/       an account's own uploads
-  avatars/  banners/    profile pictures and covers
+```bash
+cp .env.example .env        # then fill in every value (see below)
+docker compose build
+docker compose up -d
+docker compose logs -f egram
 ```
 
-The database stores a `storage_key` relative to that root, never a blob and
-never an absolute path, so the tree can move as long as the relative shape is
-kept.
+Before the first start, the three host folders in `.env` must exist and be owned
+by uid 1000. On first start, the admin account from `ADMIN_USERNAME` /
+`ADMIN_PASSWORD` is created if the database has no users. You can remove both
+values afterwards.
 
----
+## Configuration
 
-## Sources
+Every hostname, path and secret comes from the environment. `.env.example` lists
+all of them.
 
-A profile may name an Instagram or a TikTok handle to pull from, and the sync
-jobs poll every profile that has auto-poll on. The IG handle can differ from the
-local one; synced media is filed under the **local** handle so it attaches to
-that profile.
+| Variable | Purpose |
+| --- | --- |
+| `APP_HOST`, `APP_ORIGIN` | Public hostname (Traefik rule) and origin. All writes must send a matching `Origin` header |
+| `MEDIA_HOST_DIR` | Host folder holding the library, one folder per creator handle. App-owned folders start with `_` |
+| `IMPORT_HOST_DIR` | Drop folder, swept by the import job. Files younger than `IMPORT_MIN_AGE_SEC` are skipped |
+| `BACKUP_HOST_DIR` | Nightly database snapshots. The newest `BACKUP_KEEP` are kept |
+| `ADULT_COOKIE_SECRET` | Required in production. HMAC key for the 18+ unlock cookie |
+| `VAPID_*` | Optional web push keys |
 
-Instagram needs a session cookie (`IG_COOKIES_PATH`, Netscape format). More than
-one can be configured: the root `cookies.txt` is the "default" identity and one
-`cookies.txt` per subfolder of `IG_COOKIES_ROOT` adds another, rotated
-sticky-per-profile so a given creator is always fetched as the same identity.
-Request spacing (`IG_SLEEP_REQUEST`, `IG_PROFILE_SLEEP_SECONDS`,
-`IG_COOLDOWN_MINUTES`) is deliberately conservative — Instagram answers a burst
-with a soft block that outlives it by hours.
+The database lives in the named volume `egram_data` (`/data` in the container).
 
-TikTok syncs public profiles without a cookie; `TIKTOK_COOKIES_PATH` is only
-needed for private ones.
+## Jobs
 
-Both syncs shell out to `yt-dlp` (`YT_DLP_BIN`). A stale copy is the single most
-common cause of a sync that quietly stops finding anything, so it is worth
-pointing that variable at a binary you keep current rather than one baked into
-an image.
+Every background job is managed under Settings > Jobs. New jobs start disabled,
+and each one can be turned on or off, given a new interval, or run once.
 
----
+## Downloaders
 
-## Background jobs
+yt-dlp and gallery-dl live in a virtualenv at `/opt/dl` in the image. A stale
+yt-dlp is the most common reason a sync quietly finds nothing. To update them,
+turn on or run the "Update downloaders" job, or rebuild the image:
 
-An in-app scheduler owns them (no cron, no timers), configurable under
-**Settings → Background jobs**, where each can be enabled, re-intervalled or run
-once by hand.
-
-| Job | |
-|---|---|
-| `db-maintenance` | WAL checkpoint + planner statistics |
-| `db-backup` | `VACUUM INTO` a timestamped copy in `BACKUP_DIR`, keep the newest `BACKUP_KEEP` |
-| `posts-import` | sort what was dropped in `_import/` onto profiles |
-| `posts-dupescan` | scan for duplicate images — reports only, deletes nothing |
-| `posts-cleanup` | drop media rows whose file is gone, prune emptied posts |
-| `stories-cleanup` | delete expired stories, rows and files |
-| `instagram-sync` | poll every profile with IG auto-poll on |
-| `instagram-avatar-backfill` | fetch a profile picture for creators that have none |
-| `tiktok-sync` | poll every profile with TikTok auto-poll on |
-
----
-
-## Environment
-
-| | |
-|---|---|
-| `DATA_DIR` | where `elitogram.db` lives |
-| `POSTS_ROOT` | the media tree |
-| `ELITE_VERIFY_URL` | elite-v2's verify endpoint — unset means nobody can sign in |
-| `ELITE_APP_URL` | the app the login comes from; the only host an avatar URL may come from |
-| `APP_URL` | this app's own address, for the sign-in round trip and the WebSocket origin check |
-| `GATE_SECRET` | signs the 18+ unlock cookie |
-| `IMPORT_CRON_SECRET` | what a background job presents when it loops back over HTTP |
-| `ADULTS_EMAIL` | the account whose stories count as adult |
-| `IG_COOKIES_PATH`, `IG_COOKIES_ROOT` | Instagram session cookies |
-| `IG_COOKIES_HOST_DIR` | host path shown by the cookies admin panel |
-| `IG_MAX_PER_RUN`, `IG_MAX_PER_COOKIE_PER_RUN`, `IG_RETRIES` | Instagram sync throughput/retry knobs |
-| `IG_AVATAR_MAX_PER_RUN`, `IG_AVATAR_GIVE_UP_AFTER`, `IG_AVATAR_BUDGET_MINUTES` | avatar backfill: batch size, dead-cookie cutoff, wall-clock budget |
-| `TIKTOK_COOKIES_PATH`, `TIKTOK_COOKIES_ROOT` | TikTok cookies (optional) |
-| `TT_MAX_PER_RUN`, `TT_PROFILE_SLEEP_SECONDS`, `TT_SLEEP_REQUEST`, `TT_RETRIES`, `TT_TIMEOUT_MINUTES` | TikTok sync throughput/retry knobs |
-| `YT_DLP_BIN`, `GALLERY_DL_BIN`, `PYTHON_BIN` | the downloaders the syncs shell out to |
-| `POSTS_IMPORT_DIR` | overrides the importer's drop folder (default `POSTS_ROOT/_import`) |
-| `PURGE_ARCHIVE_DIR` | purge-creator.mjs moves media there instead of deleting |
-| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Web Push |
-| `BACKUP_DIR`, `BACKUP_KEEP` | the nightly `VACUUM INTO` (unset means the in-container default) |
-
----
-
-## Migrating from elite-v2
-
-`scripts/migrate-from-elitev2.mjs <source.db> [dest.db]` seeds this database
-from elite-v2's.
-
-The source **must** be a snapshot taken with SQLite's `.backup` or
-`VACUUM INTO`, not a copied file: elite-v2 runs in WAL mode, and a plain `cp` of
-the `.db` without its `-wal` opens fine and reports zero rows.
-
-Ids are preserved — a post's media, a like's `user_id`, a duplicate group's
-`media_id` and every `storage_key` reference ids that exist on the other side.
-Every insert is `INSERT OR IGNORE`, so a re-run is a top-up, not a mirror: it
-adds what is missing and deletes nothing.
-
----
-
-## Running it
-
-```
-npm install
-npm run dev           # :3021
-npm run build && npm start
+```bash
+docker compose build --pull && docker compose up -d
 ```
 
-`Dockerfile` builds a production image. `better-sqlite3` and `sharp` are native
-and the maintenance scripts run inside the container (the scheduler spawns
-them), so the image is built rather than bind-mounted.
+Instagram needs a cookies file, uploaded under Settings > Sources. TikTok works
+with public profiles and needs no cookies.
+
+## Backups and restore
+
+Snapshots are made with SQLite's online backup API, never with a file copy,
+because the database runs in WAL mode. To restore one:
+
+```bash
+docker compose stop egram
+docker run --rm -v elitogram_egram_data:/data -v "$BACKUP_HOST_DIR":/backups \
+  alpine cp /backups/<snapshot>.db /data/elitogram.db
+docker run --rm -v elitogram_egram_data:/data alpine rm -f /data/elitogram.db-wal /data/elitogram.db-shm
+docker compose start egram
+```
+
+## Development
+
+```bash
+npm ci
+npm run dev:server     # API on :3000, data in ./data
+npm run dev:client     # Vite on :5173
+npm run typecheck && npm run lint && npm run build
+```

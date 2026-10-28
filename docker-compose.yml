@@ -1,0 +1,32 @@
+services:
+  egram:
+    build: .
+    image: elitogram-cp2:latest
+    container_name: egram
+    restart: unless-stopped
+    user: "1000:1000"
+    env_file: .env
+    environment:
+      TZ: Europe/Stockholm
+    volumes:
+      - egram_data:/data
+      - ${MEDIA_HOST_DIR:?set MEDIA_HOST_DIR in .env}:/media
+      - ${IMPORT_HOST_DIR:?set IMPORT_HOST_DIR in .env}:/import
+      - ${BACKUP_HOST_DIR:?set BACKUP_HOST_DIR in .env}:/backups
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      - "traefik.http.routers.egram-secure.rule=Host(`${APP_HOST:?set APP_HOST in .env}`)"
+      - "traefik.http.routers.egram-secure.entrypoints=https"
+      - "traefik.http.routers.egram-secure.tls=true"
+      - "traefik.http.routers.egram-secure.tls.certresolver=cloudflare"
+      - "traefik.http.services.egram-service.loadbalancer.server.port=3000"
+
+volumes:
+  egram_data:
+
+networks:
+  traefik:
+    external: true

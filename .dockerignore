@@ -1,16 +1,6 @@
-# The image compiles its own native modules (better-sqlite3, sharp) in the deps
-# stage; a host node_modules copied in over them by `COPY . .` would be at best
-# redundant and at worst built against a different glibc.
 node_modules
-.next
+dist
 data
-.git
-*.log
-tsconfig.tsbuildinfo
-# Every .env, at any depth, plus the dated backups a plain `.env` rule misses
-# (mirrors .gitignore): the builder stage does COPY . . and a stray env file
-# must not end up in a layer.
 .env
-.env.*
-**/.env
-**/.env.*
+docs
+*.md
