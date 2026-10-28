@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 're
 import { Link } from 'react-router-dom';
 import type { Post } from '../api';
 import { Icon } from '../icons';
-import { Avatar, Caption, shouldIgnoreKey, useMuted } from '../ui';
+import { Avatar, ClampedCaption, shouldIgnoreKey, useMuted } from '../ui';
 import { Carousel } from './Carousel';
 import { authorLink, useLike } from './PostCard';
 
@@ -96,14 +96,6 @@ function ViewerPost({ post, active, dialog }: { post: Post; active: boolean; dia
   const like = useLike(post);
   const [index, setIndex] = useState(0);
   const [expanded, setExpanded] = useState(false);
-  const [long, setLong] = useState(false);
-  const captionRef = useRef<HTMLDivElement>(null);
-
-  // "more" only shows when the two-line clamp actually hides something.
-  useLayoutEffect(() => {
-    const c = captionRef.current;
-    if (c && !expanded) setLong(c.scrollHeight > c.clientHeight + 1);
-  }, [post.caption, expanded]);
   const [muted, setMuted] = useMuted();
   const hasVideo = post.media.some((m) => m.kind === 'video');
 
@@ -140,16 +132,7 @@ function ViewerPost({ post, active, dialog }: { post: Post; active: boolean; dia
             <Avatar src={post.author.avatar} size={28} /> {post.author.handle}
             {post.adult && <span className="pill adult">18+</span>}
           </Link>
-          {post.caption && (
-            <div ref={captionRef} className={`viewer-caption${expanded ? ' open' : ''}`}>
-              <Caption text={post.caption} />
-            </div>
-          )}
-          {long && (
-            <button className="viewer-more" onClick={() => setExpanded(!expanded)}>
-              {expanded ? 'less' : 'more'}
-            </button>
-          )}
+          {post.caption && <ClampedCaption text={post.caption} open={expanded} onToggle={() => setExpanded(!expanded)} />}
         </div>
         <div className="viewer-actions">
           <button className={`viewer-action${like.liked ? ' liked' : ''}`} onClick={() => like.toggle()} aria-label={like.liked ? 'Unlike' : 'Like'}>

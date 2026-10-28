@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Post, Tile } from '../api';
 import { Icon } from '../icons';
-import { Avatar, Caption, Sentinel, useInfinite, useMuted, usePageTitle } from '../ui';
+import { Avatar, ClampedCaption, Sentinel, useInfinite, useMuted, usePageTitle } from '../ui';
 import { authorLink, useLike } from '../components/PostCard';
 import { Grid } from '../components/Grid';
 
@@ -20,6 +20,7 @@ function ReelItem({ reel, active }: { reel: Reel; active: boolean }) {
   const [muted, setMuted] = useMuted();
   const like = useLike(reel.post);
   const [paused, setPaused] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
     const v = ref.current;
     if (!v) return;
@@ -54,11 +55,11 @@ function ReelItem({ reel, active }: { reel: Reel; active: boolean }) {
           <Icon name="play" style={{ width: 72, height: 72, fill: '#fff', stroke: '#fff' }} />
         </div>
       )}
-      <div className="reel-info">
+      <div className={`reel-info${expanded ? ' open' : ''}`}>
         <Link to={authorLink(reel.post)} className="row" style={{ fontWeight: 600, marginBottom: 6 }}>
           <Avatar src={reel.post.author.avatar} size={30} /> {reel.post.author.handle}
         </Link>
-        {reel.post.caption && <Caption text={reel.post.caption} />}
+        {reel.post.caption && <ClampedCaption text={reel.post.caption} open={expanded} onToggle={() => setExpanded(!expanded)} />}
       </div>
       <div className="reel-side">
         <button className={`icon-btn${like.liked ? ' liked' : ''}`} onClick={() => like.toggle()} aria-label="Like">

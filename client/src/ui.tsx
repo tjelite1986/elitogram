@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { get, type Me, type Page } from './api';
 
@@ -213,6 +213,28 @@ export function timeAgo(ms: number): string {
 }
 
 /** Caption text with #tags and @mentions linked. */
+/** Caption clamped to two lines over media; "more" only shows when the clamp actually hides something. */
+export function ClampedCaption({ text, open, onToggle }: { text: string; open: boolean; onToggle: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [long, setLong] = useState(false);
+  useLayoutEffect(() => {
+    const c = ref.current;
+    if (c && !open) setLong(c.scrollHeight > c.clientHeight + 1);
+  }, [text, open]);
+  return (
+    <>
+      <div ref={ref} className={`clamp-caption${open ? ' open' : ''}`}>
+        <Caption text={text} />
+      </div>
+      {long && (
+        <button className="clamp-more" onClick={onToggle}>
+          {open ? 'less' : 'more'}
+        </button>
+      )}
+    </>
+  );
+}
+
 export function Caption({ text }: { text: string }) {
   const parts: ReactNode[] = [];
   const re = /([#@])([\p{L}\p{N}_.]+)/gu;
