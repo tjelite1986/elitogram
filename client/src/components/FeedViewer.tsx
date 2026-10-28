@@ -95,6 +95,15 @@ export function FeedViewer({ posts, start, more, done, onClose }: Props) {
 function ViewerPost({ post, active, dialog }: { post: Post; active: boolean; dialog: RefObject<HTMLDivElement> }) {
   const like = useLike(post);
   const [index, setIndex] = useState(0);
+  const [expanded, setExpanded] = useState(false);
+  const [long, setLong] = useState(false);
+  const captionRef = useRef<HTMLDivElement>(null);
+
+  // "more" only shows when the two-line clamp actually hides something.
+  useLayoutEffect(() => {
+    const c = captionRef.current;
+    if (c && !expanded) setLong(c.scrollHeight > c.clientHeight + 1);
+  }, [post.caption, expanded]);
   const [muted, setMuted] = useMuted();
   const hasVideo = post.media.some((m) => m.kind === 'video');
 
@@ -124,28 +133,39 @@ function ViewerPost({ post, active, dialog }: { post: Post; active: boolean; dia
         fill
         style={{ width: '100%', height: '100%' }}
       />
-      <div className="reel-info">
-        <Link to={authorLink(post)} replace className="row" style={{ fontWeight: 600, marginBottom: 6 }}>
-          <Avatar src={post.author.avatar} size={30} /> {post.author.handle}
-          {post.adult && <span className="pill adult">18+</span>}
-        </Link>
-        {post.caption && <Caption text={post.caption} />}
-      </div>
       {/* Links replace the viewer's history entry, so Back from them lands on the feed. */}
-      <div className="reel-side">
-        <button className={`icon-btn${like.liked ? ' liked' : ''}`} onClick={() => like.toggle()} aria-label={like.liked ? 'Unlike' : 'Like'}>
-          <Icon name="heart" />
-          <span>{like.count}</span>
-        </button>
-        <Link to={`/p/${post.id}`} replace className="icon-btn" aria-label="Comments">
-          <Icon name="comment" />
-          <span>{post.comment_count}</span>
-        </Link>
-        {hasVideo && (
-          <button className="icon-btn" onClick={() => setMuted(!muted)} aria-label={muted ? 'Unmute' : 'Mute'}>
-            <Icon name={muted ? 'muted' : 'sound'} />
+      <div className={`viewer-bar${expanded ? ' open' : ''}`}>
+        <div className="viewer-text">
+          <Link to={authorLink(post)} replace className="viewer-author">
+            <Avatar src={post.author.avatar} size={28} /> {post.author.handle}
+            {post.adult && <span className="pill adult">18+</span>}
+          </Link>
+          {post.caption && (
+            <div ref={captionRef} className={`viewer-caption${expanded ? ' open' : ''}`}>
+              <Caption text={post.caption} />
+            </div>
+          )}
+          {long && (
+            <button className="viewer-more" onClick={() => setExpanded(!expanded)}>
+              {expanded ? 'less' : 'more'}
+            </button>
+          )}
+        </div>
+        <div className="viewer-actions">
+          <button className={`viewer-action${like.liked ? ' liked' : ''}`} onClick={() => like.toggle()} aria-label={like.liked ? 'Unlike' : 'Like'}>
+            <Icon name="heart" />
+            {like.count > 0 && <span>{like.count}</span>}
           </button>
-        )}
+          <Link to={`/p/${post.id}`} replace className="viewer-action" aria-label="Comments">
+            <Icon name="comment" />
+            {post.comment_count > 0 && <span>{post.comment_count}</span>}
+          </Link>
+          {hasVideo && (
+            <button className="viewer-action" onClick={() => setMuted(!muted)} aria-label={muted ? 'Unmute' : 'Mute'}>
+              <Icon name={muted ? 'muted' : 'sound'} />
+            </button>
+          )}
+        </div>
       </div>
     </>
   );
