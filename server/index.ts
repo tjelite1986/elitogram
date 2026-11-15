@@ -14,7 +14,7 @@ import { creators } from './routes/creators.js';
 import { stories } from './routes/stories.js';
 import { media } from './routes/media.js';
 import { admin } from './routes/admin.js';
-import { registerJob, startScheduler } from './jobs/scheduler.js';
+import { registerJob, startScheduler, warnIfBackupDisabled } from './jobs/scheduler.js';
 import { runImport } from './jobs/importer.js';
 import { runInstagramJob, runTikTokJob } from './sync/sources.js';
 import {
@@ -32,9 +32,10 @@ registerJob({ name: 'avatar_backfill', title: 'Avatar backfill', description: 'G
 registerJob({ name: 'duplicate_scan', title: 'Duplicate scan', description: 'Fingerprints images and reports lookalikes (never deletes)', defaultInterval: 1440, run: runDuplicateScan });
 registerJob({ name: 'missing_files', title: 'Missing files check', description: 'Flags rows whose file is gone from disk', defaultInterval: 1440, run: runMissingCheck });
 registerJob({ name: 'story_expiry', title: 'Story expiry', description: 'Expires stories after 24 h and removes old story files', defaultInterval: 15, run: runStoryExpiry });
-registerJob({ name: 'db_backup', title: 'Database backup', description: `Consistent snapshot, keeps the newest ${config.backupKeep}`, defaultInterval: 1440, run: runBackup });
+registerJob({ name: 'db_backup', title: 'Database backup', description: `Consistent snapshot, keeps the newest ${config.backupKeep}`, defaultInterval: 1440, defaultEnabled: true, run: runBackup });
 registerJob({ name: 'db_maintenance', title: 'Database maintenance', description: 'Optimises indexes, prunes sessions, checkpoints the WAL', defaultInterval: 10080, run: runDbMaintenance });
 registerJob({ name: 'update_downloaders', title: 'Update downloaders', description: 'Upgrades yt-dlp and gallery-dl', defaultInterval: 1440, run: runDownloaderUpdate });
+warnIfBackupDisabled();
 startScheduler();
 
 const app = express();

@@ -11,6 +11,8 @@ export interface JobDef {
   title: string;
   description: string;
   defaultInterval: number; // minutes
+  /** Used only when the job row is first created. Defaults to false. */
+  defaultEnabled?: boolean;
   run: (ctx: JobContext) => Promise<string>;
 }
 
@@ -41,8 +43,14 @@ export function staggeredNext(name: string, intervalMin: number, from = now()): 
 
 export function registerJob(def: JobDef): void {
   defs.set(def.name, def);
-  // New jobs start disabled.
-  db.prepare('INSERT OR IGNORE INTO jobs (name, enabled, interval_minutes) VALUES (?, 0, ?)').run(def.name, def.defaultInterval);
+  // New jobs start disabled unless the definition says otherwise. An existing row is never changed.
+  db.prepare('INSERT OR IGNORE INTO jobs (name, enabled, interval_minutes) VALUES (?, ?, ?)').run(def.name, def.defaultEnabled ? 1 : 0, def.defaultInterval);
+}
+
+/** Logs one warning line when the database backup job exists but is switched off. */
+export function warnIfBackupDisabled(): void {
+  const enabled = db.prepare("SELECT enabled FROM jobs WHERE name = 'db_backup'").pluck().get() as number | undefined;
+  if (enabled === 0) console.warn('Warning: the db_backup job is disabled, so no database backups are being taken. Enable it under Admin > Jobs.');
 }
 
 export function listJobs() {
