@@ -186,22 +186,48 @@ export async function runStoryExpiry(): Promise<string> {
 
 // --- Backups ------------------------------------------------------------------
 
+const BACKUP_DB_RE = /^elitogram-\d{8}-\d{6}\.db$/;
+const BACKUP_SIDECAR_RE = /^elitogram-\d{8}-\d{6}\.db-(shm|wal)$/;
+
+async function unlinkQuiet(file: string): Promise<void> {
+  await fsp.unlink(file).catch((err: NodeJS.ErrnoException) => {
+    if (err.code !== 'ENOENT') throw err;
+  });
+}
+
+/** Removes a backup file together with its -shm and -wal sidecars (missing files are ignored). */
+async function removeBackupFiles(dbFile: string): Promise<void> {
+  for (const suffix of ['', '-shm', '-wal']) await unlinkQuiet(dbFile + suffix);
+}
+
 /** Uses SQLite's online backup API: consistent even while the database is in WAL mode. */
 export async function runBackup(ctx: JobContext): Promise<string> {
   await fsp.mkdir(config.backupDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
   const dest = path.join(config.backupDir, `elitogram-${stamp}.db`);
   await db.backup(dest);
-  const check = new Database(dest, { readonly: true });
+  // db.backup() copies the WAL journal mode; switch the copy to DELETE so it is one self-contained file.
   try {
-    const ok = check.pragma('quick_check', { simple: true });
-    if (ok !== 'ok') throw new Error(`Backup failed its integrity check: ${ok}`);
-  } finally {
-    check.close();
+    const check = new Database(dest);
+    try {
+      check.pragma('journal_mode = DELETE');
+      const ok = check.pragma('quick_check', { simple: true });
+      if (ok !== 'ok') throw new Error(`Backup failed its integrity check: ${ok}`);
+    } finally {
+      check.close();
+    }
+  } catch (err) {
+    await removeBackupFiles(dest);
+    throw err;
   }
-  const all = (await fsp.readdir(config.backupDir)).filter((f) => /^elitogram-\d{8}-\d{6}\.db$/.test(f)).sort();
+  const names = await fsp.readdir(config.backupDir);
+  const all = names.filter((f) => BACKUP_DB_RE.test(f)).sort();
   const remove = all.slice(0, Math.max(0, all.length - config.backupKeep));
-  for (const f of remove) await fsp.unlink(path.join(config.backupDir, f)).catch(() => undefined);
+  for (const f of remove) await removeBackupFiles(path.join(config.backupDir, f));
+  // Sweep sidecars left behind by earlier runs. Only exact backup names are touched; every backup is finished here.
+  for (const f of names) {
+    if (BACKUP_SIDECAR_RE.test(f)) await unlinkQuiet(path.join(config.backupDir, f));
+  }
   const size = (await fsp.stat(dest)).size;
   ctx.log(`Wrote ${dest}`);
   return `Backup ${path.basename(dest)} (${(size / 1048576).toFixed(1)} MB), ${remove.length} old removed, ${all.length - remove.length} kept`;
