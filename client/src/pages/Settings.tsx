@@ -783,6 +783,7 @@ function UsersTab() {
   const toast = useToast();
   if (error) return <div className="card error">{error}</div>;
   if (!data) return <div className="loading">Loading…</div>;
+  const iAmAdmin = me!.role === 'admin';
   const act = async (fn: () => Promise<unknown>, msg?: string) => {
     try {
       await fn();
@@ -794,7 +795,9 @@ function UsersTab() {
   };
   return (
     <>
-      {data.items.map((u: any) => (
+      {data.items.map((u: any) => {
+        const locked = !iAmAdmin && u.role === 'admin'; // only admins may touch admin accounts
+        return (
         <div key={u.id} className="card">
           <div className="row wrap">
             <Avatar src={`/m/ua/${u.id}`} size={36} />
@@ -818,6 +821,7 @@ function UsersTab() {
                 <label key={p} className="row" style={{ fontSize: 13 }}>
                   <input
                     type="checkbox"
+                    disabled={!iAmAdmin && (u.id === me!.id || (!u.permissions.includes(p) && !me!.permissions.includes(p)))}
                     checked={u.permissions.includes(p)}
                     onChange={(e) =>
                       act(() => patch(`/api/admin/users/${u.id}`, { permissions: e.target.checked ? [...u.permissions, p] : u.permissions.filter((x: string) => x !== p) }))
@@ -835,6 +839,7 @@ function UsersTab() {
                 <button
                   key={b.id}
                   className="pill"
+                  disabled={locked}
                   style={{ background: has ? b.color : 'var(--border)', border: 0, cursor: 'pointer' }}
                   onClick={() =>
                     act(() => patch(`/api/admin/users/${u.id}`, { badges: has ? u.badges.filter((x: any) => x.id !== b.id).map((x: any) => x.id) : [...u.badges.map((x: any) => x.id), b.id] }))
@@ -848,6 +853,7 @@ function UsersTab() {
           <div className="row wrap" style={{ marginTop: 8 }}>
             <button
               className="btn secondary small"
+              disabled={locked}
               onClick={() => {
                 const pw = prompt(`New password for ${u.username} (8+ characters)`);
                 if (pw) void act(() => patch(`/api/admin/users/${u.id}`, { password: pw }), 'Password reset');
@@ -856,18 +862,19 @@ function UsersTab() {
               Reset password
             </button>
             {u.has_pin && (
-              <button className="btn secondary small" onClick={() => act(() => patch(`/api/admin/users/${u.id}`, { clear_pin: true }), 'PIN cleared')}>
+              <button className="btn secondary small" disabled={locked} onClick={() => act(() => patch(`/api/admin/users/${u.id}`, { clear_pin: true }), 'PIN cleared')}>
                 Clear PIN
               </button>
             )}
             {u.id !== me!.id && (
-              <button className="btn secondary small" onClick={() => act(() => patch(`/api/admin/users/${u.id}`, { disabled: !u.disabled }))}>
+              <button className="btn secondary small" disabled={locked} onClick={() => act(() => patch(`/api/admin/users/${u.id}`, { disabled: !u.disabled }))}>
                 {u.disabled ? 'Enable' : 'Disable'}
               </button>
             )}
           </div>
         </div>
-      ))}
+        );
+      })}
       <div className="card">
         <h3>New user</h3>
         <input placeholder="username" value={nu.username} onChange={(e) => setNu({ ...nu, username: e.target.value.toLowerCase() })} aria-label="Username" />

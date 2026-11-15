@@ -206,6 +206,7 @@ admin.post('/', (req, res) => {
   if (password.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
   if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) throw new HttpError(400, 'Username is taken');
   const role = req.body?.role === 'admin' ? 'admin' : 'member';
+  if (role === 'admin' && req.user!.role !== 'admin') throw new HttpError(403, 'Only an admin can create an admin');
   const r = db
     .prepare('INSERT INTO users (username, display_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)')
     .run(username, str(req.body?.display_name, 120) || username, hashPassword(password), role, now());
@@ -217,6 +218,9 @@ admin.patch('/:id', (req, res) => {
   const b = req.body ?? {};
   const target = db.prepare('SELECT id, role FROM users WHERE id = ?').get(id) as any;
   if (!target) throw new HttpError(404, 'User not found');
+  const callerIsAdmin = req.user!.role === 'admin';
+  // Non-admins may never touch an admin account, whatever the field.
+  if (!callerIsAdmin && target.role === 'admin') throw new HttpError(403, 'Only an admin can change an admin account');
   const adminCount = () => db.prepare("SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0").pluck().get() as number;
   db.transaction(() => {
     if (b.role === 'admin' || b.role === 'member') {
@@ -225,6 +229,12 @@ admin.patch('/:id', (req, res) => {
     }
     if (Array.isArray(b.permissions)) {
       const perms = (b.permissions as unknown[]).filter((p): p is string => typeof p === 'string' && (PERMISSIONS as readonly string[]).includes(p));
+      if (!callerIsAdmin) {
+        if (id === req.user!.id) throw new HttpError(403, 'You cannot change your own permissions');
+        const current = JSON.parse((db.prepare('SELECT permissions FROM users WHERE id = ?').pluck().get(id) as string) || '[]') as string[];
+        const held = req.user!.permissions as string[];
+        if (perms.some((p) => !current.includes(p) && !held.includes(p))) throw new HttpError(403, 'You cannot grant a permission you do not hold');
+      }
       db.prepare('UPDATE users SET permissions = ? WHERE id = ?').run(JSON.stringify(perms), id);
     }
     if (typeof b.disabled === 'boolean') {
@@ -234,6 +244,7 @@ admin.patch('/:id', (req, res) => {
     if (typeof b.password === 'string' && b.password) {
       if (b.password.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
       db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(b.password), id);
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
     }
     if (b.clear_pin === true) db.prepare('UPDATE users SET pin_hash = NULL WHERE id = ?').run(id);
     if (Array.isArray(b.badges)) {
