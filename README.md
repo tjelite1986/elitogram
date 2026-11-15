@@ -15,8 +15,9 @@ docker compose logs -f egram
 
 Before the first start, the three host folders in `.env` must exist and be owned
 by uid 1000. On first start, the admin account from `ADMIN_USERNAME` /
-`ADMIN_PASSWORD` is created if the database has no users. You can remove both
-values afterwards.
+`ADMIN_PASSWORD` is created if the database has no users. Set them for the
+first start only, then remove `ADMIN_PASSWORD` from `.env` (the app logs a
+warning at startup while it is still set).
 
 ## Configuration
 

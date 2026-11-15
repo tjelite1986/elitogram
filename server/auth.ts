@@ -169,7 +169,12 @@ export function adultFilter(req: Request): string {
 
 export function bootstrapAdmin(): void {
   const count = db.prepare('SELECT COUNT(*) FROM users').pluck().get() as number;
-  if (count > 0) return;
+  if (count > 0) {
+    if (config.adminPassword) {
+      console.warn('Warning: ADMIN_PASSWORD is only used for the first start. Remove it from .env.');
+    }
+    return;
+  }
   if (!config.adminUsername || !config.adminPassword) {
     console.warn('No users exist. Set ADMIN_USERNAME and ADMIN_PASSWORD to create the first admin.');
     return;

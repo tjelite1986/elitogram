@@ -12,6 +12,8 @@
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js",
     "lint": "eslint --max-warnings=0 server client/src",
+    "check:jobs": "node --import tsx server/scripts/check-job-defaults.ts",
+    "check:backup": "node --import tsx server/scripts/check-backup.ts",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit"
   },
   "engines": {
