@@ -109,7 +109,7 @@ posts.get('/search', (req, res) => {
   const scope = scopeOf(req);
   const creators = db
     .prepare(
-      `SELECT c.id, c.handle, c.display_name FROM creators c WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scope)} AND (c.handle LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\'
+      `SELECT c.id, c.handle, c.display_name, c.adult, c.audience FROM creators c WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scope)} AND (c.handle LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\'
         OR EXISTS (SELECT 1 FROM creator_aliases a WHERE a.creator_id = c.id AND a.alias LIKE ? ESCAPE '\\'))
        ORDER BY (c.handle = ?) DESC, length(c.handle) LIMIT 8`,
     )
@@ -124,7 +124,17 @@ posts.get('/search', (req, res) => {
   const tags = db
     .prepare(tagSql)
     .all(`${q.toLowerCase().replace(/[%_\\]/g, (m) => '\\' + m)}%`) as any[];
-  res.json({ creators: creators.map((c) => ({ ...c, avatar: `/m/ca/${c.id}` })), tags });
+  // Each creator names its audience, so a proxy (Grabbit's gateway) can check every hit.
+  res.json({
+    creators: creators.map((c) => ({
+      id: c.id,
+      handle: c.handle,
+      display_name: c.display_name,
+      audience: c.adult ? 'adult' : c.audience === 'general' ? 'general' : 'unknown',
+      avatar: `/m/ca/${c.id}`,
+    })),
+    tags,
+  });
 });
 
 posts.get('/videos', (req, res) => {
