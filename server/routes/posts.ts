@@ -2,7 +2,7 @@ import { Router, type Request } from 'express';
 import { db, now } from '../db/index.js';
 import { adultFilter, adultUnlocked, can, type SessionUser } from '../auth.js';
 import { ah, HttpError, intParam, str } from '../http.js';
-import { creatorScopeSql, parseClassify, scopeOf, scopeSql } from '../audience.js';
+import { creatorScopeSql, isScoped, parseClassify, scopeOf, scopeSql } from '../audience.js';
 import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles } from '../views.js';
 import { parseUpload } from '../media/upload.js';
 import { addMediaToPost, createPost, findCreatorByName, indexPost, moveMediaToAuthor, parseMentions, setPostHashtags, type Author } from '../library.js';
@@ -264,14 +264,17 @@ posts.patch(
       })();
       notifyMentions(caption, req.user!, id, 'post');
     }
+    // Anyone who may edit the post may mark it 18+. Lifting 18+ or setting the
+    // audience is classification and needs the profiles permission (or admin).
+    const classifier = req.user!.role === 'admin' || can(req.user!, 'profiles');
+    if (typeof body.adult === 'boolean' && !body.adult && row.adult && !classifier) throw new HttpError(403, 'Only a moderator can lift 18+');
+    const audience = body.audience === undefined ? null : parseClassify(body.audience);
+    if (body.audience !== undefined && !audience) throw new HttpError(400, 'audience must be general, unknown or adult');
+    if (audience && audience !== 'adult' && audience !== row.audience && !classifier) throw new HttpError(403, 'Only a moderator can classify posts');
     if (typeof body.adult === 'boolean') db.prepare('UPDATE posts SET adult = ? WHERE id = ?').run(body.adult ? 1 : 0, id);
-    if (body.audience !== undefined) {
-      // 'adult' sets the 18+ flag; general/unknown only change the audience and never clear 18+.
-      const a = parseClassify(body.audience);
-      if (!a) throw new HttpError(400, 'audience must be general, unknown or adult');
-      if (a === 'adult') db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
-      else db.prepare('UPDATE posts SET audience = ? WHERE id = ?').run(a, id);
-    }
+    // 'adult' sets the 18+ flag; general/unknown only change the audience and never clear 18+.
+    if (audience === 'adult') db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
+    else if (audience) db.prepare('UPDATE posts SET audience = ? WHERE id = ?').run(audience, id);
     if (body.author && typeof body.author === 'object') {
       let author: Author;
       if (body.author.self) author = { userId: req.user!.id };
@@ -282,6 +285,8 @@ posts.patch(
       }
       await moveMediaToAuthor([id], author);
       db.prepare('UPDATE posts SET creator_id = ?, user_id = ? WHERE id = ?').run(author.creatorId ?? null, author.creatorId ? null : author.userId, id);
+      // A post inherits 18+ from its creator; moving it keeps that restriction on the post itself.
+      if (row.c_adult && !classifier) db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
     }
     if (Array.isArray(body.removeMedia) && body.removeMedia.length) {
       const remaining = db.prepare('SELECT COUNT(*) FROM media WHERE post_id = ? AND missing = 0').pluck().get(id) as number;
@@ -291,8 +296,11 @@ posts.patch(
       db.transaction(() => {
         const t = now();
         const holder = db
-          .prepare('INSERT INTO posts (creator_id, user_id, uploader_id, caption, created_at, imported_at, deleted, deleted_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)')
-          .run(row.creator_id, row.user_id, req.user!.id, `Removed from post ${id}`, row.created_at, t, t);
+          .prepare(
+            'INSERT INTO posts (creator_id, user_id, uploader_id, caption, created_at, imported_at, deleted, deleted_at, adult, audience) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)',
+          )
+          // The holder keeps the post's classification: an 18+ post's media stay 18+.
+          .run(row.creator_id, row.user_id, req.user!.id, `Removed from post ${id}`, row.created_at, t, t, row.adult || row.c_adult ? 1 : 0, row.audience);
         const upd = db.prepare('UPDATE media SET post_id = ? WHERE id = ? AND post_id = ?');
         for (const mid of toRemove) upd.run(Number(holder.lastInsertRowid), mid, id);
       })();
@@ -362,6 +370,7 @@ posts.post('/posts/:id/like', (req, res) => {
 
 posts.delete('/posts/:id/like', (req, res) => {
   const id = intParam(req.params.id);
+  if (isScoped(req) && !loadVisiblePost(req, id)) throw new HttpError(404, 'Post not found');
   db.prepare('DELETE FROM likes WHERE user_id = ? AND post_id = ?').run(req.user!.id, id);
   res.json({ liked: false, like_count: db.prepare('SELECT COUNT(*) FROM likes WHERE post_id = ?').pluck().get(id) });
 });

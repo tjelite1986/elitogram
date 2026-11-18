@@ -15,6 +15,7 @@ import { stories } from './routes/stories.js';
 import { social } from './routes/social.js';
 import { media } from './routes/media.js';
 import { admin } from './routes/admin.js';
+import { refuseScoped } from './audience.js';
 import { registerJob, startScheduler, warnIfBackupDisabled } from './jobs/scheduler.js';
 import { runImport } from './jobs/importer.js';
 import { runInstagramJob, runTikTokJob } from './sync/sources.js';
@@ -65,7 +66,7 @@ app.get('/healthz', (_req, res) => {
 
 app.use('/api', account);
 app.use('/api', requireUser, posts, creators, stories, social);
-app.use('/api/admin', requireUser, admin);
+app.use('/api/admin', requireUser, refuseScoped, admin);
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });

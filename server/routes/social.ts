@@ -63,34 +63,53 @@ social.get('/photos', (req, res) => {
 
 // --- Categories: kind and orientation facets plus the top tags ---------------
 
-const categoryCache = new Map<string, { at: number; body: unknown }>();
+const categoryCache = new Map<string, { at: number; fp: string; body: unknown }>();
 const CATEGORY_TTL = 60_000;
+
+/**
+ * A cheap fingerprint of everything that decides what a scope can see (about
+ * 15 ms on 45k posts). A cached answer is reused only while it is unchanged,
+ * so a post or creator marked 18+ leaves the categories at once. The sums are
+ * weighted by id so two opposite changes do not cancel out.
+ */
+function visibilityFingerprint(): string {
+  return db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) || ':' || TOTAL(adult * id) || ':' || TOTAL((audience = 'general') * id) || ':' || TOTAL(deleted * id) || ':' || IFNULL(MAX(id), 0) FROM posts) || '|' ||
+         (SELECT COUNT(*) || ':' || TOTAL(adult * id) || ':' || TOTAL((audience = 'general') * id) || ':' || TOTAL(deleted * id) FROM creators) || '|' ||
+         (SELECT COUNT(*) || ':' || TOTAL(missing * id) || ':' || TOTAL(post_id * id) FROM media) || '|' ||
+         (SELECT COUNT(*) || ':' || TOTAL(post_id * hashtag_id) FROM post_hashtags)`,
+    )
+    .pluck()
+    .get() as string;
+}
 
 social.get('/categories', (req, res) => {
   const key = `${scopeOf(req) ?? '-'}|${adultUnlocked(req) ? 1 : 0}`;
+  const fp = visibilityFingerprint();
   const hit = categoryCache.get(key);
-  if (hit && Date.now() - hit.at < CATEGORY_TTL) {
+  if (hit && hit.fp === fp && Date.now() - hit.at < CATEGORY_TTL) {
     res.json(hit.body);
     return;
   }
-  const facts = db
+  // Aggregated in SQL: a fixed-size answer, whatever the size of the library.
+  // A post with any video is a video post; orientation comes from its first item.
+  const f = db
     .prepare(
-      `SELECT
-         EXISTS (SELECT 1 FROM media mv WHERE mv.post_id = p.id AND mv.missing = 0 AND mv.kind = 'video') AS video,
-         (SELECT mf.width FROM media mf WHERE mf.post_id = p.id AND mf.missing = 0 ORDER BY mf.position, mf.id LIMIT 1) AS w,
-         (SELECT mf.height FROM media mf WHERE mf.post_id = p.id AND mf.missing = 0 ORDER BY mf.position, mf.id LIMIT 1) AS h
-       ${POST_FROM} WHERE ${visible(req)}`,
+      `WITH v AS (SELECT p.id ${POST_FROM} WHERE ${visible(req)}),
+       m1 AS (SELECT m.post_id, m.kind, m.width, m.height, ROW_NUMBER() OVER (PARTITION BY m.post_id ORDER BY m.position, m.id) AS rn
+              FROM media m JOIN v ON v.id = m.post_id WHERE m.missing = 0),
+       pp AS (SELECT post_id, MAX(kind = 'video') AS video, MAX(CASE WHEN rn = 1 THEN width END) AS w, MAX(CASE WHEN rn = 1 THEN height END) AS h
+              FROM m1 GROUP BY post_id)
+       SELECT COUNT(*) AS total, TOTAL(video) AS video,
+         TOTAL(w > 0 AND h > w * 1.1) AS portrait, TOTAL(h > 0 AND w > h * 1.1) AS landscape,
+         TOTAL(w > 0 AND h > 0 AND w <= h * 1.1 AND h <= w * 1.1) AS square
+       FROM pp`,
     )
-    .all() as { video: number; w: number | null; h: number | null }[];
-  const kinds = { image: 0, video: 0 };
-  const orients = { portrait: 0, landscape: 0, square: 0 };
-  for (const f of facts) {
-    kinds[f.video ? 'video' : 'image']++;
-    if (!f.w || !f.h) continue;
-    if (f.h > f.w * 1.1) orients.portrait++;
-    else if (f.w > f.h * 1.1) orients.landscape++;
-    else orients.square++;
-  }
+    .get() as { total: number; video: number; portrait: number; landscape: number; square: number };
+  const kinds = { image: f.total - f.video, video: f.video };
+  const orients = { portrait: f.portrait, landscape: f.landscape, square: f.square };
   const tags = db
     .prepare(
       `SELECT h.tag, COUNT(p.id) AS n FROM hashtags h JOIN post_hashtags ph ON ph.hashtag_id = h.id JOIN posts p ON p.id = ph.post_id
@@ -98,8 +117,8 @@ social.get('/categories', (req, res) => {
        WHERE ${visible(req)} GROUP BY h.id ORDER BY n DESC, h.tag LIMIT 40`,
     )
     .all() as any[];
-  const body = { total: facts.length, kinds, orients, tags };
-  categoryCache.set(key, { at: Date.now(), body });
+  const body = { total: f.total, kinds, orients, tags };
+  categoryCache.set(key, { at: Date.now(), fp, body });
   res.json(body);
 });
 

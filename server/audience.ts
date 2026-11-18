@@ -1,4 +1,4 @@
-import type { Request } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 
 /**
  * Audience scopes (Grabbit 3.0 phase 2).
@@ -67,4 +67,17 @@ export function scopeAllows(scope: Scope | null, audience: 'adult' | 'general' |
   if (!scope) return true;
   if (audience === 'adult') return false;
   return audience === scope;
+}
+
+/**
+ * Moderation surfaces (duplicates, cleaning, deleted profiles, jobs) need full
+ * visibility to be useful, so a scoped request is refused there rather than
+ * given a partial and possibly leaky view.
+ */
+export function refuseScoped(req: Request, res: Response, next: NextFunction): void {
+  if (isScoped(req)) {
+    res.status(403).json({ error: 'Not available in a scoped request' });
+    return;
+  }
+  next();
 }

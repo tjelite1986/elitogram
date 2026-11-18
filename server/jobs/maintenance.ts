@@ -250,7 +250,7 @@ export async function squareAvatar(srcAbs: string, prefix: string): Promise<stri
   return mediaRel(dest);
 }
 
-/** Fills missing creator avatars: Instagram profile picture when a cookie is set, otherwise the newest image post. */
+/** Fills missing creator avatars: Instagram profile picture when a cookie is set, otherwise the newest image post that is not 18+. */
 export async function runAvatarBackfill(ctx: JobContext): Promise<string> {
   const list = db.prepare('SELECT id, handle, ig_handle FROM creators WHERE deleted = 0 AND avatar_path IS NULL LIMIT 200').all() as any[];
   let fromIg = 0;
@@ -281,7 +281,7 @@ export async function runAvatarBackfill(ctx: JobContext): Promise<string> {
       }
     }
     const m = db
-      .prepare("SELECT m.path FROM media m JOIN posts p ON p.id = m.post_id WHERE p.creator_id = ? AND p.deleted = 0 AND m.kind = 'image' AND m.missing = 0 ORDER BY p.created_at DESC LIMIT 1")
+      .prepare("SELECT m.path FROM media m JOIN posts p ON p.id = m.post_id WHERE p.creator_id = ? AND p.deleted = 0 AND p.adult = 0 AND m.kind = 'image' AND m.missing = 0 ORDER BY p.created_at DESC LIMIT 1")
       .get(c.id) as any;
     if (!m) continue;
     try {

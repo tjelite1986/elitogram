@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import { db } from '../db/index.js';
-import { createCreator, createPost, findCreatorByName, type IncomingFile } from '../library.js';
+import { addMediaToPost, createCreator, createPost, findCreatorByName, indexPost, type IncomingFile } from '../library.js';
 import { APP_DIRS, mediaAbs, validateHandle, moveFile } from '../media/files.js';
 import { notifyFollowers } from '../notify.js';
 import { squareAvatar } from './maintenance.js';
@@ -138,9 +138,37 @@ function cleanExtra(v: unknown): Record<string, unknown> | null {
   return Object.keys(out).length ? out : null;
 }
 
-async function readJson(abs: string): Promise<any> {
+/** Sidecars are small; anything larger is not one. */
+const SIDECAR_MAX_BYTES = 256 * 1024;
+
+/**
+ * Reads a sidecar from the drop folder: a regular file only (a symlink could
+ * point anywhere the service can read), opened without following links and
+ * capped in size before it is parsed.
+ */
+async function readSidecarText(abs: string): Promise<string | null> {
+  let fh: fsp.FileHandle | null = null;
   try {
-    return JSON.parse(await fsp.readFile(abs, 'utf8'));
+    fh = await fsp.open(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const st = await fh.stat();
+    if (!st.isFile() || st.size > SIDECAR_MAX_BYTES) return null;
+    const buf = Buffer.alloc(st.size);
+    const { bytesRead } = await fh.read(buf, 0, st.size, 0);
+    return buf.subarray(0, bytesRead).toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    await fh?.close().catch(() => undefined);
+  }
+}
+
+/** A sidecar's JSON object, or null when it is missing, unsafe, malformed or not a plain object. */
+async function readJson(abs: string): Promise<any> {
+  const text = await readSidecarText(abs);
+  if (text === null) return null;
+  try {
+    const j = JSON.parse(text);
+    return j && typeof j === 'object' && !Array.isArray(j) ? j : null;
   } catch {
     return null;
   }
@@ -198,7 +226,7 @@ async function readSidecar(dir: string, key: string, used: Set<string>): Promise
     const abs = path.join(dir, key + ext);
     if (!fs.existsSync(abs)) continue;
     used.add(abs);
-    const text = await fsp.readFile(abs, 'utf8').catch(() => '');
+    const text = (await readSidecarText(abs)) ?? '';
     if (ext === '.json') {
       try {
         const j = JSON.parse(text);
@@ -250,26 +278,43 @@ export async function runImport(ctx: JobContext): Promise<string> {
   let media = 0;
   let rejected = 0;
   let known = 0;
-  const knownKey = db.prepare('SELECT 1 FROM posts WHERE source_key = ?');
+  const knownKey = db.prepare('SELECT id FROM posts WHERE source_key = ? ORDER BY id LIMIT 1');
   const sidecars = new Set<string>();
   for (const g of groups.values()) {
     if (ctx.stopped()) break;
     g.files.sort((a, b) => (a.meta.index ?? 0) - (b.meta.index ?? 0) || a.f.rel.localeCompare(b.f.rel, undefined, { numeric: true }));
     for (const { meta } of g.files) if (meta.sidecar) sidecars.add(meta.sidecar);
     const sourceKey = g.shortcode ? `ig:${g.shortcode}` : g.postKey ? `grabbit:${g.postKey}` : null;
-    if (sourceKey && knownKey.get(sourceKey)) {
-      known++;
-      for (const { f } of g.files) await setAside(f.abs, DONE_DIR);
+    const audiences = g.files.map((x) => x.meta.audience);
+    const adult = audiences.includes('adult');
+    const existing = sourceKey ? (knownKey.get(sourceKey) as { id: number } | undefined) : undefined;
+    if (existing) {
+      // A redelivery or a late carousel item. 18+ only ever tightens: a
+      // delivery that says 18+ marks the stored post, whatever came first.
+      // Never loosened here; general/unknown on a later file changes nothing.
+      if (adult) db.prepare('UPDATE posts SET adult = 1 WHERE id = ? AND adult = 0').run(existing.id);
+      // Items the post does not hold yet (by content) join it; the rest are done.
+      const r = await addMediaToPost(existing.id, g.files.map(({ f }) => ({ abs: f.abs, name: path.basename(f.rel) })), true);
+      if (r.added) {
+        media += r.added;
+        indexPost(existing.id);
+        ctx.log(`Added ${r.added} late item(s) to post ${existing.id}`);
+      } else known++;
+      for (const x of r.rejected) {
+        const it = g.files.find(({ f }) => path.basename(f.rel) === x.name);
+        if (it) await setAside(it.f.abs, x.reason === 'already in the library' ? DONE_DIR : REJECTED_DIR);
+      }
       continue;
     }
     const caption = g.files.map((x) => x.meta.caption).find(Boolean) ?? (g.shortcode ? '' : await readSidecar(g.dir, g.key, sidecars));
     const incoming: IncomingFile[] = g.files.map(({ f }) => ({ abs: f.abs, name: path.basename(f.rel) }));
     const created = dateFromName(path.basename(g.files[0].f.rel)) ?? Math.min(...g.files.map(({ f }) => f.mtime));
     const sourceUrl = g.files.map((x) => x.meta.postUrl).find(Boolean) ?? null;
-    // Grabbit's audience: 18+ sets the flag, general marks the post; anything else stays unknown.
-    const audiences = g.files.map((x) => x.meta.audience);
-    const adult = audiences.includes('adult');
-    const audience = !adult && audiences.includes('general') ? 'general' : 'unknown';
+    // Grabbit's audience: any 18+ item sets the flag for the whole post. The
+    // post is general only when every item says general; one item without a
+    // recognised classification (missing or malformed sidecar, or unknown)
+    // keeps the whole post unknown.
+    const audience = !adult && audiences.length > 0 && audiences.every((a) => a === 'general') ? 'general' : 'unknown';
     const extra = g.files.map((x) => x.meta.extra).find(Boolean) ?? null;
     const result = await createPost({ author: { creatorId: g.creatorId }, caption, createdAt: created, sourceUrl, sourceKey, adult, audience, meta: extra, files: incoming, skipKnown: true });
     for (const r of result.rejected) {

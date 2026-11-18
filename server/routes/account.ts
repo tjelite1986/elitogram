@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { db, now } from '../db/index.js';
 import {
   adultUntil, clearAdultUnlock, endSession, hashPassword, PERMISSIONS, requirePerm, requireUser, setAdultUnlock, startSession, verifyPassword,
@@ -8,6 +8,7 @@ import { POST_FROM, visible, parseCursor, cursorSql, nextCursor, gridTiles } fro
 import { parseUpload } from '../media/upload.js';
 import { APP_DIRS, mediaRel, moveFile, sniffFile, uniqueTarget } from '../media/files.js';
 import { vapidPublicKey } from '../notify.js';
+import { creatorScopeSql, scopeOf } from '../audience.js';
 
 export const account = Router();
 
@@ -51,6 +52,19 @@ function badgesOf(userId: number) {
   return db.prepare('SELECT b.id, b.name, b.color FROM badges b JOIN user_badges ub ON ub.badge_id = b.id WHERE ub.user_id = ? ORDER BY b.name').all(userId);
 }
 
+/**
+ * Notifications a scoped request may see: those about a post it can see or a
+ * creator in its scope. Story notifications carry no reference to check, so a
+ * scoped request gets none of them.
+ */
+function notificationScopeSql(req: Request): string {
+  const scope = scopeOf(req);
+  if (!scope) return '1=1';
+  return `n.kind <> 'story'
+    AND (n.post_id IS NULL OR EXISTS (SELECT 1 ${POST_FROM} WHERE p.id = n.post_id AND ${visible(req, true)}))
+    AND (n.creator_id IS NULL OR EXISTS (SELECT 1 FROM creators cn WHERE cn.id = n.creator_id AND cn.adult = 0 AND ${creatorScopeSql(scope, 'cn')}))`;
+}
+
 account.get('/me', (req, res) => {
   if (!req.user) {
     res.json({ user: null });
@@ -60,7 +74,7 @@ account.get('/me', (req, res) => {
   res.json({
     user: { ...req.user, bio: u.bio, avatar: `/m/ua/${req.user.id}`, badges: badgesOf(req.user.id) },
     adult_until: adultUntil(req),
-    unread: db.prepare('SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL').pluck().get(req.user.id),
+    unread: db.prepare(`SELECT COUNT(*) FROM notifications n WHERE n.user_id = ? AND n.read_at IS NULL AND ${notificationScopeSql(req)}`).pluck().get(req.user.id),
     vapid_key: vapidPublicKey(),
   });
 });
@@ -158,7 +172,7 @@ account.get('/notifications', (req, res) => {
   const rows = db
     .prepare(
       `SELECT n.id, n.kind, n.text, n.post_id, n.creator_id, n.created_at, n.read_at, n.actor_id, c.handle AS creator_handle
-       FROM notifications n LEFT JOIN creators c ON c.id = n.creator_id WHERE n.user_id = ? ORDER BY n.created_at DESC LIMIT 100`,
+       FROM notifications n LEFT JOIN creators c ON c.id = n.creator_id WHERE n.user_id = ? AND ${notificationScopeSql(req)} ORDER BY n.created_at DESC LIMIT 100`,
     )
     .all(req.user!.id) as any[];
   res.json({ items: rows.map((r) => ({ ...r, actor_avatar: r.actor_id ? `/m/ua/${r.actor_id}` : r.creator_id ? `/m/ca/${r.creator_id}` : null })) });

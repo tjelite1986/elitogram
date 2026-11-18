@@ -93,6 +93,21 @@ async function main(): Promise<void> {
     check('B media refused in general scope', bThumb.status === 404 && !bThumb.headers.get('x-egram-audience'));
     check('B post refused in general scope', (await get(`/api/posts/${bTile.id}`, 'general')).status === 404);
 
+    // Scoped media answers vary by audience and are revalidated on every use.
+    check('scoped media vary on the audience', /x-egram-audience/i.test(aThumb.headers.get('vary') ?? ''));
+    check('scoped media are revalidated', aThumb.headers.get('cache-control') === 'private, no-cache', aThumb.headers.get('cache-control') ?? '');
+
+    // Creator pictures say whose they are, and only inside the scope.
+    const aAvatar = await get(`/m/ca/${A.id}`, 'general');
+    check('A avatar names its creator and scope', aAvatar.headers.get('x-egram-picture') === 'creator' && aAvatar.headers.get('x-egram-creator') === A.handle && aAvatar.headers.get('x-egram-audience') === 'general');
+    const bAvatar = await get(`/m/ca/${B.id}`, 'general');
+    check('B avatar in general scope is a neutral picture', !bAvatar.headers.get('x-egram-picture') && /svg/.test(bAvatar.headers.get('content-type') ?? ''));
+
+    // Moderation surfaces refuse scoped requests.
+    check('admin routes refuse a scoped request', (await get('/api/admin/jobs', 'general')).status === 403);
+    check('deleted creators refuse a scoped request', (await get('/api/creators-deleted', 'general')).status === 403);
+    check('scoped notifications answer', (await get('/api/notifications', 'general')).status === 200);
+
     // 18+ is out of reach for any scope.
     if (ADULT_POST_ID) {
       for (const s of ['general', 'unknown'] as const) {
@@ -102,11 +117,14 @@ async function main(): Promise<void> {
       check('classify of an unknown handle is skipped', adultClassify.json?.skipped?.[0]?.reason === 'not found');
     }
 
-    // Reclassifying one post moves it between the lanes.
+    // Reclassifying one post moves it between the lanes (and the categories follow at once).
+    const catsBefore = (await get('/api/categories', 'general')).json?.total;
     const patch = await call('PATCH', `/api/posts/${bTile.id}`, 'unknown', { audience: 'general' });
     check('PATCH audience general from the unknown lane', patch.status === 200 && patch.json.out_of_scope === true, JSON.stringify(patch.json).slice(0, 120));
     check('reclassified post now visible in general scope', (await get(`/api/posts/${bTile.id}`, 'general')).json?.audience === 'general');
     check('B profile now visible through its general post', (await get(`/api/creators/${B.handle}`, 'general')).status === 200);
+    const catsAfter = (await get('/api/categories', 'general')).json?.total;
+    check('categories follow a reclassification without waiting for the cache', catsAfter === catsBefore + 1, `${catsBefore} -> ${catsAfter}`);
     const back = await call('PATCH', `/api/posts/${bTile.id}`, null, { audience: 'unknown' });
     check('post restored to unknown', back.json?.audience === 'unknown');
     check('PATCH rejects a bad audience', (await call('PATCH', `/api/posts/${bTile.id}`, null, { audience: 'nope' })).status === 400);

@@ -2,7 +2,7 @@ import { Router, type Request } from 'express';
 import { db, now } from '../db/index.js';
 import { adultUnlocked, can, requirePerm } from '../auth.js';
 import { ah, HttpError, str } from '../http.js';
-import { creatorScopeSql, parseClassify, scopeOf, scopeSql } from '../audience.js';
+import { creatorScopeSql, parseClassify, refuseScoped, scopeOf, scopeSql } from '../audience.js';
 import { parseCursor, cursorSql, nextCursor, gridTiles, POST_FROM, visible } from '../views.js';
 import { parseUpload } from '../media/upload.js';
 import { APP_DIRS, isReservedName, mediaRel, sniffFile, uniqueTarget, moveFile, validateHandle } from '../media/files.js';
@@ -221,7 +221,15 @@ creators.patch('/creators/:handle', (req, res) => {
     }
   })();
   reindexCreator(c.id);
-  res.json(creatorJson(req, db.prepare('SELECT * FROM creators WHERE id = ?').get(c.id)));
+  // The edit may have moved the creator out of the caller's scope (e.g. marked
+  // 18+): then only acknowledge, like a post edit does, without the profile.
+  const scope = scopeOf(req);
+  const after = db.prepare(`SELECT * FROM creators c WHERE c.id = ? AND (${scope ? `c.adult = 0 AND ${creatorScopeSql(scope)}` : '1=1'})`).get(c.id);
+  if (!after) {
+    res.json({ handle: c.handle, out_of_scope: true });
+    return;
+  }
+  res.json(creatorJson(req, after));
 });
 
 async function storeImage(req: Request, dir: string, prefix: string): Promise<string> {
@@ -323,7 +331,7 @@ creators.post(
   }),
 );
 
-creators.get('/creators-deleted', requirePerm('profiles'), (_req, res) => {
+creators.get('/creators-deleted', refuseScoped, requirePerm('profiles'), (_req, res) => {
   res.json({ items: db.prepare("SELECT id, handle, display_name FROM creators WHERE deleted = 1 AND handle NOT LIKE '%~merged%' ORDER BY handle").all() });
 });
 

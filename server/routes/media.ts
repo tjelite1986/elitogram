@@ -3,7 +3,7 @@ import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
 import { db } from '../db/index.js';
 import { adultUnlocked } from '../auth.js';
-import { creatorScopeSql, effectiveAudience, scopeAllows, scopeOf } from '../audience.js';
+import { creatorScopeSql, effectiveAudience, isScoped, scopeAllows, scopeOf } from '../audience.js';
 import { ah, intParam } from '../http.js';
 import { mediaAbs } from '../media/files.js';
 import { thumbnail } from '../media/probe.js';
@@ -11,6 +11,18 @@ import { fallbackAvatar, fallbackBanner, mimeFor, sendFile } from '../media/serv
 
 /** Media URLs: every one requires a session (mounted behind requireUser) and honours the 18+ gate. */
 export const media = Router();
+
+// Every answer depends on the audience scope, so caches must key on it. A
+// scoped answer (Grabbit's gateway) is also revalidated on every use, so a
+// reclassified post or creator is judged again instead of served from cache.
+media.use((req, res, next) => {
+  res.setHeader('Vary', 'X-Egram-Audience');
+  if (isScoped(req)) {
+    const set = res.setHeader.bind(res);
+    res.setHeader = ((name: string, value: any) => set(name, name.toLowerCase() === 'cache-control' ? 'private, no-cache' : value)) as typeof res.setHeader;
+  }
+  next();
+});
 
 function notFound(res: Response): void {
   res.status(404).json({ error: 'Not found' });
@@ -100,29 +112,50 @@ function sendImageOr(req: Request, res: Response, rel: string | null, fallback: 
   sendFile(req, res, abs, mimeFor(abs, 'image/jpeg'), 'private, max-age=3600');
 }
 
-/** A scoped request gets a creator's own pictures only when the creator is visible in that scope. */
-function creatorInScope(req: Request, id: number): boolean {
+/**
+ * A scoped request gets a creator's own pictures only when the creator is
+ * visible in that scope and owns no 18+ post. Avatars were derived from a
+ * creator's newest image post without recording which one, so a creator with
+ * any 18+ post (deleted ones included) may carry a crop of it.
+ */
+function creatorPictureInScope(req: Request, id: number): boolean {
   const scope = scopeOf(req);
-  return !scope || !!db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${creatorScopeSql(scope)}`).get(id);
+  if (!scope) return true;
+  return !!db
+    .prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND c.adult = 0 AND ${creatorScopeSql(scope)} AND NOT EXISTS (SELECT 1 FROM posts pa WHERE pa.creator_id = c.id AND pa.adult = 1)`)
+    .get(id);
+}
+
+/** Tells a proxy whose picture this is: a creator's in the request's scope, or an account's. */
+function describePicture(req: Request, res: Response, kind: 'creator' | 'user', handle: string): void {
+  res.setHeader('X-Egram-Picture', kind);
+  if (kind === 'creator') {
+    res.setHeader('X-Egram-Audience', scopeOf(req) ?? 'any');
+    res.setHeader('X-Egram-Creator', handle);
+  }
 }
 
 media.get('/ca/:id(\\d+)', (req, res) => {
   const c = db.prepare('SELECT id, handle, display_name, avatar_path, adult FROM creators WHERE id = ?').get(intParam(req.params.id)) as any;
   if (!c) return fallbackAvatar(res, '?');
+  // A scoped request gets the same neutral picture for hidden and missing creators.
+  if (!creatorPictureInScope(req, c.id)) return fallbackAvatar(res, '?');
   if (c.adult && !adultUnlocked(req)) return fallbackAvatar(res, '18+');
-  if (!creatorInScope(req, c.id)) return fallbackAvatar(res, '?');
+  describePicture(req, res, 'creator', c.handle);
   sendImageOr(req, res, c.avatar_path, () => fallbackAvatar(res, c.display_name || c.handle));
 });
 
 media.get('/cb/:id(\\d+)', (req, res) => {
   const id = intParam(req.params.id);
-  const c = db.prepare('SELECT banner_path, adult FROM creators WHERE id = ?').get(id) as any;
-  if (!c || (c.adult && !adultUnlocked(req)) || !creatorInScope(req, id)) return fallbackBanner(res);
+  const c = db.prepare('SELECT handle, banner_path, adult FROM creators WHERE id = ?').get(id) as any;
+  if (!c || (c.adult && !adultUnlocked(req)) || !creatorPictureInScope(req, id)) return fallbackBanner(res);
+  describePicture(req, res, 'creator', c.handle);
   sendImageOr(req, res, c.banner_path, () => fallbackBanner(res));
 });
 
 media.get('/ua/:id(\\d+)', (req, res) => {
   const u = db.prepare('SELECT username, display_name, avatar_path FROM users WHERE id = ?').get(intParam(req.params.id)) as any;
   if (!u) return fallbackAvatar(res, '?');
+  describePicture(req, res, 'user', u.username);
   sendImageOr(req, res, u.avatar_path, () => fallbackAvatar(res, u.display_name || u.username));
 });

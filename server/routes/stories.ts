@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { db, now } from '../db/index.js';
-import { adultUnlocked } from '../auth.js';
+import { adultUnlocked, can } from '../auth.js';
 import { parseClassify, scopeOf } from '../audience.js';
 import { ah, HttpError, intParam } from '../http.js';
 import { parseUpload } from '../media/upload.js';
@@ -47,10 +47,15 @@ stories.post(
       if (!s) throw new HttpError(400, 'Not a supported image or video');
       const dest = await uniqueTarget(`${APP_DIRS.stories}/${req.user!.id}`, `story_${Date.now()}`, s.ext);
       await moveFile(f.abs, dest);
+      // 'adult' (either field) marks the story 18+. Marking it general is
+      // classification: only a moderator (profiles) or an admin may.
+      const asked = parseClassify(up.fields.audience);
+      const adult = up.fields.adult === '1' || asked === 'adult';
+      const general = !adult && asked === 'general' && (req.user!.role === 'admin' || can(req.user!, 'profiles'));
       const t = now();
       const r = db
         .prepare('INSERT INTO stories (user_id, kind, mime, path, adult, audience, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(req.user!.id, s.kind, s.mime, mediaRel(dest), up.fields.adult === '1' ? 1 : 0, parseClassify(up.fields.audience) === 'general' ? 'general' : 'unknown', t, t + DAY);
+        .run(req.user!.id, s.kind, s.mime, mediaRel(dest), adult ? 1 : 0, general ? 'general' : 'unknown', t, t + DAY);
       const others = db.prepare('SELECT id FROM users WHERE id != ? AND disabled = 0').pluck().all(req.user!.id) as number[];
       for (const uid of others) {
         notify({ userId: uid, kind: 'story', actorId: req.user!.id, text: `${req.user!.display_name || req.user!.username} added a story`, url: '/' });

@@ -196,10 +196,10 @@ export async function createPost(input: CreatePostInput): Promise<CreatePostResu
 }
 
 /** Adds media to an existing post (edit page). */
-export async function addMediaToPost(postId: number, files: IncomingFile[]): Promise<CreatePostResult> {
+export async function addMediaToPost(postId: number, files: IncomingFile[], skipKnown = false): Promise<CreatePostResult> {
   const post = db.prepare('SELECT creator_id, user_id FROM posts WHERE id = ?').get(postId) as { creator_id: number | null; user_id: number | null } | undefined;
   if (!post) throw new Error('Post not found');
-  const { ok, rejected } = await prepare(files, false);
+  const { ok, rejected } = await prepare(files, skipKnown);
   const dirRel = authorDir({ creatorId: post.creator_id, userId: post.user_id });
   let pos = (db.prepare('SELECT COALESCE(MAX(position), -1) FROM media WHERE post_id = ?').pluck().get(postId) as number) + 1;
   let added = 0;
