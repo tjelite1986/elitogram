@@ -75,8 +75,11 @@ stories.post('/stories/:id/view', (req, res) => {
 
 stories.get('/stories/:id/viewers', (req, res) => {
   const id = intParam(req.params.id);
-  const s = db.prepare('SELECT user_id FROM stories WHERE id = ?').get(id) as any;
+  const s = db.prepare('SELECT user_id, adult, audience FROM stories WHERE id = ?').get(id) as any;
   if (!s || s.user_id !== req.user!.id) throw new HttpError(404, 'Story not found');
+  // A scoped request sees viewers only of a story it could see itself.
+  const scope = scopeOf(req);
+  if (scope && (s.adult || (scope === 'general') !== (s.audience === 'general'))) throw new HttpError(404, 'Story not found');
   const rows = db
     .prepare('SELECT u.id, u.username, u.display_name, v.viewed_at FROM story_views v JOIN users u ON u.id = v.user_id WHERE v.story_id = ? AND v.user_id != ? ORDER BY v.viewed_at DESC')
     .all(id, req.user!.id) as any[];

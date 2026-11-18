@@ -2,7 +2,7 @@ import { Router, type Request } from 'express';
 import { db, now } from '../db/index.js';
 import { adultFilter, adultUnlocked, can, type SessionUser } from '../auth.js';
 import { ah, HttpError, intParam, str } from '../http.js';
-import { creatorScopeSql, isScoped, parseClassify, scopeOf, scopeSql } from '../audience.js';
+import { creatorScopeSql, effectiveAudience, isScoped, parseClassify, scopeOf, scopeSql } from '../audience.js';
 import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles } from '../views.js';
 import { parseUpload } from '../media/upload.js';
 import { addMediaToPost, createPost, findCreatorByName, indexPost, moveMediaToAuthor, parseMentions, setPostHashtags, type Author } from '../library.js';
@@ -233,6 +233,18 @@ function resolveAuthor(req: Request, fields: Record<string, string>): Author {
   return { userId: req.user!.id };
 }
 
+/**
+ * A post inherits "general" from its creator, so putting a post under a creator
+ * classified general is itself a classification: only a moderator (admin or the
+ * profiles permission) may do it. Others keep posting under unclassified creators.
+ */
+function assertMayAssignCreator(req: Request, creatorId: number | null, currentCreatorId: number | null): void {
+  if (!creatorId || creatorId === currentCreatorId) return;
+  if (req.user!.role === 'admin' || can(req.user!, 'profiles')) return;
+  const aud = db.prepare('SELECT audience FROM creators WHERE id = ?').pluck().get(creatorId);
+  if (aud === 'general') throw new HttpError(403, 'Only a moderator can post under a creator classified general');
+}
+
 posts.post(
   '/posts',
   ah(async (req, res) => {
@@ -240,6 +252,7 @@ posts.post(
     try {
       if (up.files.length === 0) throw new HttpError(400, 'Add at least one image or video');
       const author = resolveAuthor(req, up.fields);
+      assertMayAssignCreator(req, author.creatorId ?? null, null);
       const result = await createPost({
         author,
         uploaderId: req.user!.id,
@@ -266,6 +279,32 @@ posts.patch(
     if (!row) throw new HttpError(404, 'Post not found');
     if (!canEditPost(req.user!, row)) throw new HttpError(403, 'Forbidden');
     const body = req.body ?? {};
+    // Validate and authorize every requested change before writing anything, so a
+    // refused part never leaves the others half applied (or mentions already sent).
+    // Anyone who may edit the post may mark it 18+. Lifting 18+ or setting the
+    // audience is classification and needs the profiles permission (or admin).
+    const classifier = req.user!.role === 'admin' || can(req.user!, 'profiles');
+    if (typeof body.adult === 'boolean' && !body.adult && row.adult && !classifier) throw new HttpError(403, 'Only a moderator can lift 18+');
+    const audience = body.audience === undefined ? null : parseClassify(body.audience);
+    if (body.audience !== undefined && !audience) throw new HttpError(400, 'audience must be general, unknown or adult');
+    if (audience && audience !== 'adult' && audience !== row.audience && !classifier) throw new HttpError(403, 'Only a moderator can classify posts');
+    let author: Author | null = null;
+    if (body.author && typeof body.author === 'object') {
+      if (body.author.self) author = { userId: req.user!.id };
+      else {
+        const c = findCreatorByName(str(body.author.creator, 80));
+        if (!c) throw new HttpError(400, 'Unknown creator');
+        author = { creatorId: c.id };
+      }
+      assertMayAssignCreator(req, author.creatorId ?? null, row.creator_id);
+    }
+    let toRemove: number[] = [];
+    if (Array.isArray(body.removeMedia) && body.removeMedia.length) {
+      const remaining = db.prepare('SELECT COUNT(*) FROM media WHERE post_id = ? AND missing = 0').pluck().get(id) as number;
+      toRemove = (body.removeMedia as unknown[]).map(Number).filter(Number.isInteger);
+      if (toRemove.length >= remaining) throw new HttpError(400, 'A post needs at least one media item; delete the post instead');
+    }
+
     if (typeof body.caption === 'string') {
       const caption = str(body.caption);
       db.transaction(() => {
@@ -274,43 +313,35 @@ posts.patch(
       })();
       notifyMentions(caption, req.user!, id, 'post');
     }
-    // Anyone who may edit the post may mark it 18+. Lifting 18+ or setting the
-    // audience is classification and needs the profiles permission (or admin).
-    const classifier = req.user!.role === 'admin' || can(req.user!, 'profiles');
-    if (typeof body.adult === 'boolean' && !body.adult && row.adult && !classifier) throw new HttpError(403, 'Only a moderator can lift 18+');
-    const audience = body.audience === undefined ? null : parseClassify(body.audience);
-    if (body.audience !== undefined && !audience) throw new HttpError(400, 'audience must be general, unknown or adult');
-    if (audience && audience !== 'adult' && audience !== row.audience && !classifier) throw new HttpError(403, 'Only a moderator can classify posts');
     if (typeof body.adult === 'boolean') db.prepare('UPDATE posts SET adult = ? WHERE id = ?').run(body.adult ? 1 : 0, id);
     // 'adult' sets the 18+ flag; general/unknown only change the audience and never clear 18+.
     if (audience === 'adult') db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
     else if (audience) db.prepare('UPDATE posts SET audience = ? WHERE id = ?').run(audience, id);
-    if (body.author && typeof body.author === 'object') {
-      let author: Author;
-      if (body.author.self) author = { userId: req.user!.id };
-      else {
-        const c = findCreatorByName(str(body.author.creator, 80));
-        if (!c) throw new HttpError(400, 'Unknown creator');
-        author = { creatorId: c.id };
-      }
+    if (author) {
       await moveMediaToAuthor([id], author);
       db.prepare('UPDATE posts SET creator_id = ?, user_id = ? WHERE id = ?').run(author.creatorId ?? null, author.creatorId ? null : author.userId, id);
       // A post inherits 18+ from its creator; moving it keeps that restriction on the post itself.
       if (row.c_adult && !classifier) db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
     }
-    if (Array.isArray(body.removeMedia) && body.removeMedia.length) {
-      const remaining = db.prepare('SELECT COUNT(*) FROM media WHERE post_id = ? AND missing = 0').pluck().get(id) as number;
-      const toRemove = (body.removeMedia as unknown[]).map(Number).filter(Number.isInteger);
-      if (toRemove.length >= remaining) throw new HttpError(400, 'A post needs at least one media item; delete the post instead');
+    if (toRemove.length) {
       // Removed media move to a new hidden, deleted post so the file and its row stay recoverable.
       db.transaction(() => {
+        // The holder keeps the post's owner and takes the stricter classification of
+        // before this edit and after it: 18+ if either was, general only if both were.
+        // Read back from the database, since this same request may just have marked it 18+.
+        const cur = db
+          .prepare('SELECT p.adult, p.audience, c.adult AS c_adult, c.audience AS c_audience FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.id = ?')
+          .get(id) as { adult: number; audience: string; c_adult: number | null; c_audience: string | null };
+        const before = effectiveAudience(row);
+        const after = effectiveAudience(cur);
+        const adult = before === 'adult' || after === 'adult' ? 1 : 0;
+        const holderAudience = row.audience === 'general' && cur.audience === 'general' ? 'general' : 'unknown';
         const t = now();
         const holder = db
           .prepare(
             'INSERT INTO posts (creator_id, user_id, uploader_id, caption, created_at, imported_at, deleted, deleted_at, adult, audience) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)',
           )
-          // The holder keeps the post's classification: an 18+ post's media stay 18+.
-          .run(row.creator_id, row.user_id, req.user!.id, `Removed from post ${id}`, row.created_at, t, t, row.adult || row.c_adult ? 1 : 0, row.audience);
+          .run(row.creator_id, row.user_id, req.user!.id, `Removed from post ${id}`, row.created_at, t, t, adult, holderAudience);
         const upd = db.prepare('UPDATE media SET post_id = ? WHERE id = ? AND post_id = ?');
         for (const mid of toRemove) upd.run(Number(holder.lastInsertRowid), mid, id);
       })();

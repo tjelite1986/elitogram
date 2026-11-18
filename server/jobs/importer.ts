@@ -4,7 +4,8 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { addMediaToPost, createCreator, createPost, findCreatorByName, indexPost, type IncomingFile } from '../library.js';
-import { APP_DIRS, mediaAbs, validateHandle, moveFile } from '../media/files.js';
+import { APP_DIRS, mediaAbs, validateHandle, moveFile, sha256File } from '../media/files.js';
+import { effectiveAudience } from '../audience.js';
 import { notifyFollowers } from '../notify.js';
 import { squareAvatar } from './maintenance.js';
 import type { JobContext } from './scheduler.js';
@@ -211,7 +212,7 @@ async function applyProfile(f: PendingFile, j: any, ctx: JobContext): Promise<bo
       const buf = Buffer.from(await r.arrayBuffer());
       if (!r.ok || !/^image\//.test(r.headers.get('content-type') ?? '') || buf.length > 10 * 1024 * 1024) throw new Error(`profile picture: HTTP ${r.status}`);
       await fsp.writeFile(tmp, buf);
-      db.prepare('UPDATE creators SET avatar_path = ? WHERE id = ?').run(await squareAvatar(tmp, `c${c.id}`), c.id);
+      db.prepare("UPDATE creators SET avatar_path = ?, avatar_source = 'profile' WHERE id = ?").run(await squareAvatar(tmp, `c${c.id}`), c.id);
     } catch (err) {
       ctx.log(`${row.handle}: ${(err as Error).message}`);
     } finally {
@@ -278,7 +279,10 @@ export async function runImport(ctx: JobContext): Promise<string> {
   let media = 0;
   let rejected = 0;
   let known = 0;
-  const knownKey = db.prepare('SELECT id FROM posts WHERE source_key = ? ORDER BY id LIMIT 1');
+  const knownKey = db.prepare(
+    'SELECT p.id, p.creator_id, p.adult, p.audience, c.adult AS c_adult, c.audience AS c_audience FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.source_key = ? ORDER BY p.id LIMIT 1',
+  );
+  const tightenBytes = db.prepare('UPDATE posts SET adult = 1 WHERE adult = 0 AND id IN (SELECT post_id FROM media WHERE sha256 = ?)');
   const sidecars = new Set<string>();
   for (const g of groups.values()) {
     if (ctx.stopped()) break;
@@ -287,7 +291,36 @@ export async function runImport(ctx: JobContext): Promise<string> {
     const sourceKey = g.shortcode ? `ig:${g.shortcode}` : g.postKey ? `grabbit:${g.postKey}` : null;
     const audiences = g.files.map((x) => x.meta.audience);
     const adult = audiences.includes('adult');
-    const existing = sourceKey ? (knownKey.get(sourceKey) as { id: number } | undefined) : undefined;
+    // 18+ only ever tightens. Byte deduplication would discard a file the library
+    // already holds (perhaps from an older import under another key or none), so
+    // an 18+ delivery first marks every stored post that holds the same bytes.
+    if (adult) {
+      for (const { f } of g.files) {
+        const sha = await sha256File(f.abs).catch(() => null);
+        if (sha && tightenBytes.run(sha).changes) ctx.log(`Marked 18+ the stored post(s) holding the bytes of ${f.rel}`);
+      }
+    }
+    const existing = sourceKey ? (knownKey.get(sourceKey) as any) : undefined;
+    if (existing && existing.creator_id !== g.creatorId) {
+      // The source key is the only link, so a delivery for another creator never joins this post.
+      ctx.log(`Not added to post ${existing.id}: ${sourceKey} arrived for another creator`);
+      for (const { f } of g.files) await setAside(f.abs, REJECTED_DIR);
+      continue;
+    }
+    if (existing && !adult && effectiveAudience(existing) === 'general' && !audiences.every((a) => a === 'general')) {
+      // A late item joins a general post only when it is itself classified general;
+      // otherwise it would be shown as general without anyone having classified it.
+      let held = 0;
+      for (const { f } of g.files) {
+        const sha = await sha256File(f.abs).catch(() => null);
+        const inLibrary = !!sha && !!db.prepare('SELECT 1 FROM media WHERE sha256 = ? LIMIT 1').get(sha);
+        if (inLibrary) held++;
+        await setAside(f.abs, inLibrary ? DONE_DIR : REJECTED_DIR);
+      }
+      if (held < g.files.length) ctx.log(`Not added to general post ${existing.id}: a late item of ${sourceKey} is not classified general`);
+      else known++;
+      continue;
+    }
     if (existing) {
       // A redelivery or a late carousel item. 18+ only ever tightens: a
       // delivery that says 18+ marks the stored post, whatever came first.

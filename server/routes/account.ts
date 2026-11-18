@@ -8,7 +8,7 @@ import { POST_FROM, visible, parseCursor, cursorSql, nextCursor, gridTiles } fro
 import { parseUpload } from '../media/upload.js';
 import { APP_DIRS, mediaRel, moveFile, sniffFile, uniqueTarget } from '../media/files.js';
 import { vapidPublicKey } from '../notify.js';
-import { creatorScopeSql, scopeOf } from '../audience.js';
+import { creatorScopeSql, isScoped, scopeOf } from '../audience.js';
 
 export const account = Router();
 
@@ -185,6 +185,8 @@ account.post('/notifications/read', (req, res) => {
 });
 
 account.post('/push/subscribe', (req, res) => {
+  // Push is dispatched per user, outside any scope, so a scoped client may not register for it.
+  if (isScoped(req)) throw new HttpError(403, 'Not available in a scoped request');
   const s = req.body ?? {};
   const endpoint = str(s.endpoint, 1000);
   if (!/^https:\/\//.test(endpoint) || !s.keys?.p256dh || !s.keys?.auth) throw new HttpError(400, 'Invalid subscription');

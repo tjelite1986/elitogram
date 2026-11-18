@@ -8,13 +8,18 @@ db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
 
+// Each step reads user_version inside its own IMMEDIATE transaction, so two
+// processes starting at once cannot both run the same migration.
 function migrate(): void {
-  const current = db.pragma('user_version', { simple: true }) as number;
-  for (let i = current; i < migrations.length; i++) {
-    db.transaction(() => {
-      db.exec(migrations[i]);
-      db.pragma(`user_version = ${i + 1}`);
-    })();
+  const step = db.transaction((): boolean => {
+    const current = db.pragma('user_version', { simple: true }) as number;
+    if (current >= migrations.length) return false;
+    db.exec(migrations[current]);
+    db.pragma(`user_version = ${current + 1}`);
+    return true;
+  });
+  while (step.immediate()) {
+    /* next migration */
   }
 }
 migrate();

@@ -70,13 +70,14 @@ const CATEGORY_TTL = 60_000;
  * A cheap fingerprint of everything that decides what a scope can see (about
  * 15 ms on 45k posts). A cached answer is reused only while it is unchanged,
  * so a post or creator marked 18+ leaves the categories at once. The sums are
- * weighted by id so two opposite changes do not cancel out.
+ * weighted by id so two opposite changes do not cancel out. A post's creator is
+ * part of it, since a post inherits 18+ and general from whoever it belongs to.
  */
 function visibilityFingerprint(): string {
   return db
     .prepare(
       `SELECT
-         (SELECT COUNT(*) || ':' || TOTAL(adult * id) || ':' || TOTAL((audience = 'general') * id) || ':' || TOTAL(deleted * id) || ':' || IFNULL(MAX(id), 0) FROM posts) || '|' ||
+         (SELECT COUNT(*) || ':' || TOTAL(adult * id) || ':' || TOTAL((audience = 'general') * id) || ':' || TOTAL(deleted * id) || ':' || TOTAL(IFNULL(creator_id, 0) * id) || ':' || IFNULL(MAX(id), 0) FROM posts) || '|' ||
          (SELECT COUNT(*) || ':' || TOTAL(adult * id) || ':' || TOTAL((audience = 'general') * id) || ':' || TOTAL(deleted * id) FROM creators) || '|' ||
          (SELECT COUNT(*) || ':' || TOTAL(missing * id) || ':' || TOTAL(post_id * id) FROM media) || '|' ||
          (SELECT COUNT(*) || ':' || TOTAL(post_id * hashtag_id) FROM post_hashtags)`,

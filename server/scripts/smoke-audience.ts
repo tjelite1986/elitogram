@@ -99,7 +99,10 @@ async function main(): Promise<void> {
 
     // Creator pictures say whose they are, and only inside the scope.
     const aAvatar = await get(`/m/ca/${A.id}`, 'general');
-    check('A avatar names its creator and scope', aAvatar.headers.get('x-egram-picture') === 'creator' && aAvatar.headers.get('x-egram-creator') === A.handle && aAvatar.headers.get('x-egram-audience') === 'general');
+    // A crop of unknown source (older avatars) gets the neutral picture in a scope.
+    const aNamed = aAvatar.headers.get('x-egram-picture') === 'creator' && aAvatar.headers.get('x-egram-creator') === A.handle && aAvatar.headers.get('x-egram-audience') === 'general';
+    const aNeutral = !aAvatar.headers.get('x-egram-picture') && /svg/.test(aAvatar.headers.get('content-type') ?? '');
+    check('A avatar names its creator and scope, or is neutral', aNamed || aNeutral, aNamed ? 'named' : 'neutral');
     const bAvatar = await get(`/m/ca/${B.id}`, 'general');
     check('B avatar in general scope is a neutral picture', !bAvatar.headers.get('x-egram-picture') && /svg/.test(bAvatar.headers.get('content-type') ?? ''));
 
@@ -107,6 +110,8 @@ async function main(): Promise<void> {
     check('admin routes refuse a scoped request', (await get('/api/admin/jobs', 'general')).status === 403);
     check('deleted creators refuse a scoped request', (await get('/api/creators-deleted', 'general')).status === 403);
     check('scoped notifications answer', (await get('/api/notifications', 'general')).status === 200);
+    const push = await call('POST', '/api/push/subscribe', 'general', { endpoint: 'https://push.example.com/x', keys: { p256dh: 'x', auth: 'x' } });
+    check('push subscription refused in a scoped request', push.status === 403);
 
     // 18+ is out of reach for any scope.
     if (ADULT_POST_ID) {

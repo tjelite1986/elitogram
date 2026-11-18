@@ -268,7 +268,7 @@ export async function runAvatarBackfill(ctx: JobContext): Promise<string> {
           await runProc(config.galleryDlBin, ['--cookies', ck.path, '-D', dir, '--range', '1', `https://www.instagram.com/${c.ig_handle}/avatar/`], { timeoutMs: 120_000 });
           const file = (await fsp.readdir(dir)).find((f) => /\.(jpe?g|png|webp)$/i.test(f));
           if (file) {
-            db.prepare('UPDATE creators SET avatar_path = ? WHERE id = ?').run(await squareAvatar(path.join(dir, file), `c${c.id}`), c.id);
+            db.prepare("UPDATE creators SET avatar_path = ?, avatar_source = 'profile' WHERE id = ?").run(await squareAvatar(path.join(dir, file), `c${c.id}`), c.id);
             fromIg++;
             continue;
           }
@@ -281,11 +281,11 @@ export async function runAvatarBackfill(ctx: JobContext): Promise<string> {
       }
     }
     const m = db
-      .prepare("SELECT m.path FROM media m JOIN posts p ON p.id = m.post_id WHERE p.creator_id = ? AND p.deleted = 0 AND p.adult = 0 AND m.kind = 'image' AND m.missing = 0 ORDER BY p.created_at DESC LIMIT 1")
+      .prepare("SELECT m.id, m.path FROM media m JOIN posts p ON p.id = m.post_id WHERE p.creator_id = ? AND p.deleted = 0 AND p.adult = 0 AND m.kind = 'image' AND m.missing = 0 ORDER BY p.created_at DESC LIMIT 1")
       .get(c.id) as any;
     if (!m) continue;
     try {
-      db.prepare('UPDATE creators SET avatar_path = ? WHERE id = ?').run(await squareAvatar(mediaAbs(m.path), `c${c.id}`), c.id);
+      db.prepare('UPDATE creators SET avatar_path = ?, avatar_source = ? WHERE id = ?').run(await squareAvatar(mediaAbs(m.path), `c${c.id}`), `post:${m.id}`, c.id);
       fromPost++;
     } catch (err) {
       ctx.log(`${c.handle}: ${(err as Error).message}`);

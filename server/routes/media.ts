@@ -114,13 +114,24 @@ function sendImageOr(req: Request, res: Response, rel: string | null, fallback: 
 
 /**
  * A scoped request gets a creator's own pictures only when the creator is
- * visible in that scope and owns no 18+ post. Avatars were derived from a
- * creator's newest image post without recording which one, so a creator with
- * any 18+ post (deleted ones included) may carry a crop of it.
+ * visible in that scope, owns no 18+ post, and the picture's source is known
+ * and still allowed: the creator's platform profile picture, or a crop of a
+ * media item whose post is still present and not 18+. Older crops have no
+ * recorded source (they may come from a since-purged 18+ post), so they get
+ * the neutral picture until they are replaced.
  */
-function creatorPictureInScope(req: Request, id: number): boolean {
+function creatorPictureInScope(req: Request, id: number, source: string | null): boolean {
   const scope = scopeOf(req);
   if (!scope) return true;
+  if (!source) return false;
+  if (source !== 'profile') {
+    const m = /^post:(\d+)$/.exec(source);
+    if (!m) return false;
+    const ok = db
+      .prepare('SELECT 1 FROM media mx JOIN posts px ON px.id = mx.post_id WHERE mx.id = ? AND px.adult = 0 AND px.creator_id = ?')
+      .get(Number(m[1]), id);
+    if (!ok) return false;
+  }
   return !!db
     .prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND c.adult = 0 AND ${creatorScopeSql(scope)} AND NOT EXISTS (SELECT 1 FROM posts pa WHERE pa.creator_id = c.id AND pa.adult = 1)`)
     .get(id);
@@ -136,10 +147,10 @@ function describePicture(req: Request, res: Response, kind: 'creator' | 'user', 
 }
 
 media.get('/ca/:id(\\d+)', (req, res) => {
-  const c = db.prepare('SELECT id, handle, display_name, avatar_path, adult FROM creators WHERE id = ?').get(intParam(req.params.id)) as any;
+  const c = db.prepare('SELECT id, handle, display_name, avatar_path, avatar_source, adult FROM creators WHERE id = ?').get(intParam(req.params.id)) as any;
   if (!c) return fallbackAvatar(res, '?');
   // A scoped request gets the same neutral picture for hidden and missing creators.
-  if (!creatorPictureInScope(req, c.id)) return fallbackAvatar(res, '?');
+  if (!creatorPictureInScope(req, c.id, c.avatar_path ? c.avatar_source : 'profile')) return fallbackAvatar(res, '?');
   if (c.adult && !adultUnlocked(req)) return fallbackAvatar(res, '18+');
   describePicture(req, res, 'creator', c.handle);
   sendImageOr(req, res, c.avatar_path, () => fallbackAvatar(res, c.display_name || c.handle));
@@ -147,8 +158,8 @@ media.get('/ca/:id(\\d+)', (req, res) => {
 
 media.get('/cb/:id(\\d+)', (req, res) => {
   const id = intParam(req.params.id);
-  const c = db.prepare('SELECT handle, banner_path, adult FROM creators WHERE id = ?').get(id) as any;
-  if (!c || (c.adult && !adultUnlocked(req)) || !creatorPictureInScope(req, id)) return fallbackBanner(res);
+  const c = db.prepare('SELECT handle, banner_path, banner_source, adult FROM creators WHERE id = ?').get(id) as any;
+  if (!c || (c.adult && !adultUnlocked(req)) || !creatorPictureInScope(req, id, c.banner_path ? c.banner_source : 'profile')) return fallbackBanner(res);
   describePicture(req, res, 'creator', c.handle);
   sendImageOr(req, res, c.banner_path, () => fallbackBanner(res));
 });

@@ -315,11 +315,12 @@ creators.post(
       db.prepare(
         `UPDATE creators SET
            ig_handle = COALESCE(ig_handle, ?), tiktok_handle = COALESCE(tiktok_handle, ?),
+           avatar_source = CASE WHEN avatar_path IS NULL THEN ? ELSE avatar_source END, banner_source = CASE WHEN banner_path IS NULL THEN ? ELSE banner_source END,
            avatar_path = COALESCE(avatar_path, ?), banner_path = COALESCE(banner_path, ?),
            bio = CASE WHEN bio = '' THEN ? ELSE bio END, adult = MAX(adult, ?),
            audience = CASE WHEN audience = 'general' OR ? = 'general' THEN 'general' ELSE audience END
          WHERE id = ?`,
-      ).run(from.ig_handle, from.tiktok_handle, from.avatar_path, from.banner_path, from.bio, from.adult, from.audience, into.id);
+      ).run(from.ig_handle, from.tiktok_handle, from.avatar_source, from.banner_source, from.avatar_path, from.banner_path, from.bio, from.adult, from.audience, into.id);
       // The emptied profile keeps its row (soft-deleted), but its handle is freed to live on as an alias.
       db.prepare("UPDATE creators SET deleted = 1, ig_autopoll = 0, tiktok_autopoll = 0, handle = handle || '~merged' || id WHERE id = ?").run(from.id);
     })();
