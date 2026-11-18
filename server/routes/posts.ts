@@ -504,6 +504,17 @@ posts.post('/posts/:id/comments', (req, res) => {
   res.status(201).json({ id: Number(r.lastInsertRowid) });
 });
 
+/** Deletes a comment through its post, so a scoped caller can only reach comments on posts it may see. */
+posts.delete('/posts/:id/comments/:cid', (req, res) => {
+  const id = intParam(req.params.id);
+  if (!loadVisiblePost(req, id)) throw new HttpError(404, 'Post not found');
+  const c = db.prepare('SELECT user_id FROM comments WHERE id = ? AND post_id = ?').get(intParam(req.params.cid), id) as { user_id: number } | undefined;
+  if (!c) throw new HttpError(404, 'Comment not found');
+  if (c.user_id !== req.user!.id && req.user!.role !== 'admin') throw new HttpError(403, 'Forbidden');
+  db.prepare('DELETE FROM comments WHERE id = ?').run(intParam(req.params.cid));
+  res.json({ ok: true });
+});
+
 posts.delete('/comments/:id', (req, res) => {
   const id = intParam(req.params.id);
   const c = db.prepare('SELECT user_id FROM comments WHERE id = ?').get(id) as { user_id: number } | undefined;

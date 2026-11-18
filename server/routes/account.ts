@@ -172,7 +172,8 @@ account.get('/users/:username/posts', (req, res) => {
 account.get('/notifications', (req, res) => {
   const rows = db
     .prepare(
-      `SELECT n.id, n.kind, n.text, n.post_id, n.creator_id, n.created_at, n.read_at, n.actor_id, c.handle AS creator_handle
+      `SELECT n.id, n.kind, n.text, n.post_id, n.creator_id, n.created_at, n.read_at, n.actor_id, c.handle AS creator_handle,
+         (SELECT COALESCE(pc.handle, pu.username) FROM posts pp LEFT JOIN creators pc ON pc.id = pp.creator_id LEFT JOIN users pu ON pu.id = pp.user_id WHERE pp.id = n.post_id) AS post_author_handle
        FROM notifications n LEFT JOIN creators c ON c.id = n.creator_id WHERE n.user_id = ? AND ${notificationScopeSql(req)} ORDER BY n.created_at DESC LIMIT 100`,
     )
     .all(req.user!.id) as any[];
