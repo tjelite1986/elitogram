@@ -7,12 +7,13 @@
  * and clears the test user's viewing history.
  *
  *   BASE=http://localhost:3901 SMOKE_USER=... SMOKE_PASS=... \
- *     [ADULT_POST_ID=<id of an 18+ post>] node --import tsx server/scripts/smoke-audience.ts
+ *     [ADULT_POST_ID=<id of an 18+ post>] [ACCOUNT_USER=<account with its own posts>] node --import tsx server/scripts/smoke-audience.ts
  */
 const BASE = (process.env.BASE ?? 'http://localhost:3000').replace(/\/$/, '');
 const USER = process.env.SMOKE_USER ?? '';
 const PASS = process.env.SMOKE_PASS ?? '';
 const ADULT_POST_ID = Number(process.env.ADULT_POST_ID) || 0;
+const ACCOUNT_USER = process.env.ACCOUNT_USER ?? '';
 
 let cookie = '';
 let failures = 0;
@@ -187,6 +188,37 @@ async function main(): Promise<void> {
 
     const dl = await get(`/m/${aTile.media_id}?download=1`, 'general');
     check('download asks for an attachment (or the file is absent from this copy)', dl.status === 404 || /attachment/.test(dl.headers.get('content-disposition') ?? ''));
+
+    // Phase 2 final: comments through their post, account-authored media,
+    // creator identities.
+    const text = `smoke comment ${Date.now()}`;
+    const made = await call('POST', `/api/posts/${aTile.id}/comments`, 'general', { body: text });
+    check('comment on a general post', made.status === 201 && Number.isInteger(made.json?.id));
+    const listed = await get(`/api/posts/${aTile.id}/comments`, 'general');
+    const mineC = (listed.json?.items ?? []).find((c: any) => c.id === made.json?.id);
+    check('comment listed with can_delete', mineC?.body === text && mineC?.can_delete === true);
+    check('comment on a post outside the scope is 404', (await call('POST', `/api/posts/${bTile.id}/comments`, 'general', { body: text })).status === 404);
+    const otherGeneral = fi.find((p: any) => p.id !== aTile.id);
+    if (otherGeneral) {
+      check('comment delete through another post is 404', (await call('DELETE', `/api/posts/${otherGeneral.id}/comments/${made.json?.id}`, 'general')).status === 404);
+    }
+    check('comment delete through a post outside the scope is 404', (await call('DELETE', `/api/posts/${bTile.id}/comments/${made.json?.id}`, 'general')).status === 404);
+    check('comment delete through its post', (await call('DELETE', `/api/posts/${aTile.id}/comments/${made.json?.id}`, 'general')).status === 200);
+    check('comment gone', !((await get(`/api/posts/${aTile.id}/comments`, 'general')).json?.items ?? []).some((c: any) => c.id === made.json?.id));
+
+    // ACCOUNT_USER: an account that wrote unclassified posts itself (no creator).
+    if (ACCOUNT_USER) {
+      const tile = (await get(`/api/users/${encodeURIComponent(ACCOUNT_USER)}/posts`, 'unknown')).json?.items?.[0];
+      const t = tile ? await get(`/m/${tile.media_id}/t`, 'unknown') : null;
+      check('account-authored media names the account', !!t && t.status === 200 && t.headers.get('x-egram-account') === ACCOUNT_USER && !t.headers.get('x-egram-creator'),
+        t ? `${t.status} ${t.headers.get('x-egram-account')}` : 'no tile');
+    } else console.log('skip account-authored media: set ACCOUNT_USER');
+    check('creator media never names an account', !aThumb.headers.get('x-egram-account'));
+
+    const ids = await get(`/api/creator-identities?h=${encodeURIComponent(A.handle)}&h=${encodeURIComponent(B.handle)}`, 'general');
+    check('identities in general scope list A only', Array.isArray(ids.json?.items?.[A.handle]) && !(B.handle in (ids.json?.items ?? {})), JSON.stringify(Object.keys(ids.json?.items ?? {})));
+    const idsU = await get(`/api/creator-identities?h=${encodeURIComponent(B.handle)}`, 'unknown');
+    check('identities in the unknown scope list B', Array.isArray(idsU.json?.items?.[B.handle]));
   } finally {
     const reset = await call('POST', '/api/creators-classify', null, { handles: [A.handle], audience: 'unknown' });
     check('A restored to unknown', reset.json?.updated?.includes(A.handle));
