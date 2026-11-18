@@ -254,7 +254,10 @@ for (const kind of ['avatar', 'banner'] as const) {
       const c = loadCreator(req, req.params.handle);
       const rel = await storeImage(req, kind === 'avatar' ? APP_DIRS.avatars : APP_DIRS.banners, `c${c.id}`);
       // The previous picture is kept on disk; the cleaning job may remove it once nothing references it.
-      db.prepare(`UPDATE creators SET ${kind}_path = ? WHERE id = ?`).run(rel, c.id);
+      // A picture a moderator chose counts as a known source for scoped requests;
+      // anyone else's upload is of unknown source and shows only unscoped.
+      const chosen = req.user!.role === 'admin' || can(req.user!, 'profiles');
+      db.prepare(`UPDATE creators SET ${kind}_path = ?, ${kind}_source = ? WHERE id = ?`).run(rel, chosen ? 'chosen' : null, c.id);
       res.json({ ok: true, url: `/m/${kind === 'avatar' ? 'ca' : 'cb'}/${c.id}?v=${Date.now()}` });
     }),
   );

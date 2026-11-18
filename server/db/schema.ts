@@ -261,7 +261,8 @@ export const migrations: string[] = [
   CREATE INDEX creators_audience ON creators(audience);
   `,
   // Grabbit 3.0 phase 2 (additive): where a creator's avatar and banner came from.
-  // 'profile' = the creator's own platform profile picture; 'post:<media id>' = a
+  // 'profile' = the creator's own platform profile picture; 'chosen' = uploaded by
+  // a moderator; 'post:<media id>' = a
   // crop of that media item; NULL = unknown (older crops). A scoped request is only
   // given a picture whose source is known and still in scope.
   `

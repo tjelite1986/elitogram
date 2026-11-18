@@ -3,7 +3,7 @@ import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
 import { db } from '../db/index.js';
 import { adultUnlocked } from '../auth.js';
-import { creatorScopeSql, effectiveAudience, isScoped, scopeAllows, scopeOf } from '../audience.js';
+import { creatorScopeSql, effectiveAudience, isScoped, scopeAllows, scopeOf, scopeSql } from '../audience.js';
 import { ah, intParam } from '../http.js';
 import { mediaAbs } from '../media/files.js';
 import { thumbnail } from '../media/probe.js';
@@ -115,8 +115,9 @@ function sendImageOr(req: Request, res: Response, rel: string | null, fallback: 
 /**
  * A scoped request gets a creator's own pictures only when the creator is
  * visible in that scope, owns no 18+ post, and the picture's source is known
- * and still allowed: the creator's platform profile picture, or a crop of a
- * media item whose post is still present and not 18+. Older crops have no
+ * and still allowed: the creator's platform profile picture, one a moderator
+ * chose, or a crop of a media item whose post is still present, not 18+ and
+ * visible in the scope. Older crops have no
  * recorded source (they may come from a since-purged 18+ post), so they get
  * the neutral picture until they are replaced.
  */
@@ -124,11 +125,15 @@ function creatorPictureInScope(req: Request, id: number, source: string | null):
   const scope = scopeOf(req);
   if (!scope) return true;
   if (!source) return false;
-  if (source !== 'profile') {
+  if (source !== 'profile' && source !== 'chosen') {
     const m = /^post:(\d+)$/.exec(source);
     if (!m) return false;
+    // The crop's own post must still exist, belong to this creator and be visible in this scope.
     const ok = db
-      .prepare('SELECT 1 FROM media mx JOIN posts px ON px.id = mx.post_id WHERE mx.id = ? AND px.adult = 0 AND px.creator_id = ?')
+      .prepare(
+        `SELECT 1 FROM media mx JOIN posts p ON p.id = mx.post_id LEFT JOIN creators c ON c.id = p.creator_id
+         WHERE mx.id = ? AND p.creator_id = ? AND p.deleted = 0 AND p.adult = 0 AND COALESCE(c.adult, 0) = 0 AND ${scopeSql(scope)}`,
+      )
       .get(Number(m[1]), id);
     if (!ok) return false;
   }
