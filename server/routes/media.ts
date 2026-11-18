@@ -32,8 +32,8 @@ function loadMedia(req: Request, id: number): any {
   const m = db
     .prepare(
       `SELECT m.id, m.path, m.kind, m.mime, m.missing, m.sha256, m.created_at, p.deleted, p.adult, p.audience, p.uploader_id, p.user_id,
-         c.adult AS c_adult, c.audience AS c_audience, c.deleted AS c_deleted, c.handle AS c_handle
-       FROM media m JOIN posts p ON p.id = m.post_id LEFT JOIN creators c ON c.id = p.creator_id WHERE m.id = ?`,
+         c.adult AS c_adult, c.audience AS c_audience, c.deleted AS c_deleted, c.handle AS c_handle, u.username AS u_username
+       FROM media m JOIN posts p ON p.id = m.post_id LEFT JOIN creators c ON c.id = p.creator_id LEFT JOIN users u ON u.id = p.user_id WHERE m.id = ?`,
     )
     .get(id) as any;
   if (!m || m.missing) return null;
@@ -53,7 +53,10 @@ function loadMedia(req: Request, id: number): any {
  */
 function describe(res: Response, m: any): void {
   res.setHeader('X-Egram-Audience', m.effective);
+  // A post has a creator or an account as its author, never both: exactly one
+  // of these names it.
   if (m.c_handle) res.setHeader('X-Egram-Creator', m.c_handle);
+  else if (m.u_username) res.setHeader('X-Egram-Account', m.u_username);
 }
 
 /** `?download=1` asks the browser to save the file under its library name. */
