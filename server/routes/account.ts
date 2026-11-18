@@ -54,13 +54,14 @@ function badgesOf(userId: number) {
 
 /**
  * Notifications a scoped request may see: those about a post it can see or a
- * creator in its scope. Story notifications carry no reference to check, so a
- * scoped request gets none of them.
+ * creator in its scope. Story notifications carry no reference to check, and
+ * system notifications carry free text that can name a creator outside the
+ * scope (a merge names its source creator), so a scoped request gets neither.
  */
 function notificationScopeSql(req: Request): string {
   const scope = scopeOf(req);
   if (!scope) return '1=1';
-  return `n.kind <> 'story'
+  return `n.kind NOT IN ('story', 'system')
     AND (n.post_id IS NULL OR EXISTS (SELECT 1 ${POST_FROM} WHERE p.id = n.post_id AND ${visible(req, true)}))
     AND (n.creator_id IS NULL OR EXISTS (SELECT 1 FROM creators cn WHERE cn.id = n.creator_id AND cn.adult = 0 AND ${creatorScopeSql(scope, 'cn')}))`;
 }
