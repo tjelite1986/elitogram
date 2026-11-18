@@ -153,14 +153,32 @@ creators.get('/creator-identities', (req, res) => {
     .filter((x) => /^[a-z0-9._~-]{1,100}$/.test(x))
     .slice(0, 100);
   const scope = scopeOf(req);
-  // Only creators the caller could see: an identity list is still a fact about a profile.
-  const scopeCond = scope ? `AND c.adult = 0 AND ${creatorScopeSql(scope)}` : adultUnlocked(req) ? '' : 'AND c.adult = 0';
-  const one = db.prepare(`SELECT c.id, c.handle, c.ig_handle, c.tiktok_handle, c.links FROM creators c WHERE c.handle = ? AND c.deleted = 0 ${scopeCond}`);
+  // Only creators the caller could see: an identity list is still a fact about a
+  // profile. In a scope that is the creator's own profile, or any post by the
+  // creator the scope can see (a post held in review under a creator classified
+  // general shows in the unknown scope while its creator does not). Deleted
+  // posts count too, since their media stay reachable for their editors.
+  const inScope = scope
+    ? `AND c.adult = 0 AND (${creatorScopeSql(scope)} OR EXISTS (SELECT 1 FROM posts p WHERE p.creator_id = c.id AND p.adult = 0 AND ${scopeSql(scope)}))`
+    : adultUnlocked(req)
+      ? ''
+      : 'AND c.adult = 0';
+  const one = db.prepare(`SELECT c.id, c.handle, c.ig_handle, c.tiktok_handle, c.links FROM creators c WHERE c.handle = ? AND c.deleted = 0 ${inScope}`);
+  const anyCreator = db.prepare('SELECT 1 FROM creators WHERE handle = ? AND deleted = 0');
+  const account = db.prepare('SELECT 1 FROM users WHERE username = ?');
   const aliases = db.prepare('SELECT alias FROM creator_aliases WHERE creator_id = ?').pluck();
   const items: Record<string, string[]> = {};
+  // Handles that name an account and no creator: an account has no other names.
+  // Listed explicitly, so a caller can tell an account from a creator that was
+  // not answered (outside the scope, or unknown) and refuse the latter. A handle
+  // held by a creator outside the scope is never listed as an account.
+  const accounts: string[] = [];
   for (const h of [...new Set(handles)]) {
     const c = one.get(h) as any;
-    if (!c) continue;
+    if (!c) {
+      if (!anyCreator.get(h) && account.get(h)) accounts.push(h);
+      continue;
+    }
     const names = new Set<string>();
     for (const n of [...(aliases.all(c.id) as string[]), c.ig_handle, c.tiktok_handle, ...linkHandles(c.links)]) {
       const v = String(n ?? '').trim().replace(/^@/, '').toLowerCase();
@@ -168,7 +186,7 @@ creators.get('/creator-identities', (req, res) => {
     }
     items[c.handle] = [...names];
   }
-  res.set('Cache-Control', 'private, no-store').json({ items });
+  res.set('Cache-Control', 'private, no-store').json({ items, accounts });
 });
 
 creators.post('/creators-classify', requirePerm('profiles'), (req, res) => {

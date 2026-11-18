@@ -31,8 +31,17 @@ export function parseUpload(req: Request): Promise<ParsedUpload> {
     const fields: Record<string, string> = {};
     const files: Uploaded[] = [];
     const writes: Promise<void>[] = [];
+    const outs: fs.WriteStream[] = [];
     const cleanup = async () => {
       await Promise.all(files.map((f) => fsp.unlink(f.abs).catch(() => undefined)));
+    };
+    // Settles once: a request torn down mid-body may still let the parser close.
+    let settled = false;
+    const fail = async (err: Error) => {
+      if (settled) return;
+      settled = true;
+      await cleanup();
+      reject(err);
     };
     let bb: busboy.Busboy;
     try {
@@ -46,10 +55,15 @@ export function parseUpload(req: Request): Promise<ParsedUpload> {
       fields[name] = value;
     });
     bb.on('file', (field, stream, info) => {
+      if (settled) {
+        stream.resume();
+        return;
+      }
       const abs = path.join(tmpDir, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.upload`);
       const entry: Uploaded = { field, name: info.filename || 'file', abs, size: 0 };
       files.push(entry);
       const out = fs.createWriteStream(abs);
+      outs.push(out);
       stream.on('data', (c: Buffer) => {
         entry.size += c.length;
       });
@@ -59,33 +73,46 @@ export function parseUpload(req: Request): Promise<ParsedUpload> {
       writes.push(
         new Promise((res, rej) => {
           out.on('finish', res);
+          out.on('close', res);
           out.on('error', rej);
           stream.on('error', rej);
         }),
       );
       stream.pipe(out);
     });
-    bb.on('error', async (err) => {
-      await cleanup();
-      reject(err);
+    bb.on('error', (err) => {
+      void fail(err as Error);
     });
     bb.on('close', async () => {
+      if (settled) return;
       try {
         await Promise.all(writes);
       } catch (err) {
-        await cleanup();
-        reject(err);
+        await fail(err as Error);
         return;
       }
       if (failed) {
-        await cleanup();
-        reject(failed);
+        await fail(failed);
         return;
       }
+      if (settled) return;
+      settled = true;
       resolve({ fields, files: files.filter((f) => f.size > 0), cleanup });
     });
-    req.on('aborted', () => {
-      failed = new Error('Upload aborted');
+    // The client went away (cancelled, or left the page) before the body ended.
+    // The parser may never close then, so tear it down here: stop feeding it,
+    // close every file being written and remove what was staged.
+    const abort = async () => {
+      if (settled) return;
+      req.unpipe(bb);
+      bb.removeAllListeners('file');
+      for (const out of outs) out.destroy();
+      await Promise.allSettled(writes);
+      await fail(new Error('Upload aborted'));
+    };
+    req.on('aborted', () => void abort());
+    req.on('close', () => {
+      if (!req.complete) void abort();
     });
     req.pipe(bb);
   });

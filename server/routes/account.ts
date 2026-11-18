@@ -181,7 +181,9 @@ account.get('/notifications', (req, res) => {
 });
 
 account.post('/notifications/read', (req, res) => {
-  db.prepare('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL').run(now(), req.user!.id);
+  // A scoped request marks only what it could list: notifications outside the
+  // scope stay unread for the views that can show them.
+  db.prepare(`UPDATE notifications AS n SET read_at = ? WHERE n.user_id = ? AND n.read_at IS NULL AND ${notificationScopeSql(req)}`).run(now(), req.user!.id);
   res.json({ ok: true });
 });
 

@@ -223,10 +223,32 @@ posts.get('/posts/:id', (req, res) => {
   res.json(post);
 });
 
+/**
+ * May this caller name an 18+ creator as a destination? A scoped request never
+ * sees 18+, and neither does a caller who has not unlocked it; to them an 18+
+ * creator does not exist, so naming one must answer exactly like a name that
+ * matches nothing (no "created as 18+" in the reply).
+ */
+const seesAdult = (req: Request): boolean => !isScoped(req) && adultUnlocked(req);
+
+/** A creator by handle or alias, as far as this caller may see it. */
+function findDestinationCreator(req: Request, name: string): { id: number; handle: string } | undefined {
+  const c = findCreatorByName(name);
+  if (!c || seesAdult(req)) return c;
+  const adult = db.prepare('SELECT adult FROM creators WHERE id = ?').pluck().get(c.id);
+  return adult ? undefined : c;
+}
+
+/** Asked again at insert time: the destination may have become 18+ meanwhile. */
+function assertDestinationStillVisible(req: Request, creatorId: number | null, name: string): void {
+  if (!creatorId || seesAdult(req)) return;
+  if (db.prepare('SELECT adult FROM creators WHERE id = ?').pluck().get(creatorId)) throw new HttpError(400, `Unknown creator "${name}"`);
+}
+
 function resolveAuthor(req: Request, fields: Record<string, string>): Author {
   const creator = str(fields.creator, 80).trim().replace(/^@/, '');
   if (creator) {
-    const c = findCreatorByName(creator);
+    const c = findDestinationCreator(req, creator);
     if (!c) throw new HttpError(400, `Unknown creator "${creator}"`);
     return { creatorId: c.id };
   }
@@ -287,13 +309,19 @@ posts.post(
         caption: str(up.fields.caption),
         adult,
         files: up.files.map((f) => ({ abs: f.abs, name: f.name })),
-        beforeInsert: () => uploadAudience(req, creatorId, wanted, adult),
+        beforeInsert: () => {
+          assertDestinationStillVisible(req, creatorId, str(up.fields.creator, 80).trim().replace(/^@/, ''));
+          return uploadAudience(req, creatorId, wanted, adult);
+        },
       });
       if (!result.postId) throw new HttpError(400, `No usable media: ${result.rejected.map((r) => `${r.name} (${r.reason})`).join(', ')}`);
       notifyMentions(str(up.fields.caption), req.user!, result.postId, 'post');
       if (author.creatorId) notifyFollowers(author.creatorId, result.postId, req.user!.id);
       const stored = db.prepare('SELECT audience FROM posts WHERE id = ?').pluck().get(result.postId);
-      res.status(201).json({ id: result.postId, rejected: result.rejected, audience: adult ? 'adult' : stored === 'review' ? 'review' : currentPostAudience(result.postId) });
+      // A scoped caller learns the new id and nothing about the classification;
+      // it asks for the post in each scope like any other.
+      if (isScoped(req)) res.status(201).json({ id: result.postId, rejected: result.rejected });
+      else res.status(201).json({ id: result.postId, rejected: result.rejected, audience: adult ? 'adult' : stored === 'review' ? 'review' : currentPostAudience(result.postId) });
     } finally {
       await up.cleanup();
     }
@@ -322,7 +350,7 @@ posts.patch(
     if (body.author && typeof body.author === 'object') {
       if (body.author.self) author = { userId: req.user!.id };
       else {
-        const c = findCreatorByName(str(body.author.creator, 80));
+        const c = findDestinationCreator(req, str(body.author.creator, 80));
         if (!c) throw new HttpError(400, 'Unknown creator');
         author = { creatorId: c.id };
       }
@@ -382,7 +410,12 @@ posts.patch(
         const before = effectiveAudience(row);
         const after = effectiveAudience(cur);
         const adult = before === 'adult' || after === 'adult' ? 1 : 0;
-        const holderAudience = row.audience === 'general' && cur.audience === 'general' ? 'general' : 'unknown';
+        // The holder keeps the original creator, so 'unknown' would let it inherit
+        // general from that creator. It does so only when the post was shown as
+        // general both before and after; otherwise (held for review, or not
+        // general on either side) it is held for review itself.
+        const holderAudience =
+          row.audience === 'general' && cur.audience === 'general' ? 'general' : before === 'general' && after === 'general' ? 'unknown' : 'review';
         const t = now();
         const holder = db
           .prepare(

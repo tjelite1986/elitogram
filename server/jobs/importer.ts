@@ -364,10 +364,14 @@ export async function runImport(ctx: JobContext): Promise<string> {
     const created = dateFromName(path.basename(g.files[0].f.rel)) ?? Math.min(...g.files.map(({ f }) => f.mtime));
     const sourceUrl = g.files.map((x) => x.meta.postUrl).find(Boolean) ?? null;
     // Grabbit's audience: any 18+ item sets the flag for the whole post. The
-    // post is general only when every item says general; one item without a
-    // recognised classification (missing or malformed sidecar, or unknown)
-    // keeps the whole post unknown.
-    const audience = !adult && audiences.length > 0 && audiences.every((a) => a === 'general') ? 'general' : 'unknown';
+    // post is general only when every item says general. A delivery that
+    // carries a classification but not general on every item (one item
+    // unknown, or without a recognised sidecar) is held for review: it must not
+    // inherit general from its creator either. A file with no classification
+    // at all (an ordinary import) stays unknown and follows its creator.
+    const allGeneral = audiences.length > 0 && audiences.every((a) => a === 'general');
+    const classified = audiences.some((a) => a !== null);
+    const audience = adult ? 'unknown' : allGeneral ? 'general' : classified ? 'review' : 'unknown';
     const extra = g.files.map((x) => x.meta.extra).find(Boolean) ?? null;
     const result = await createPost({ author: { creatorId: g.creatorId }, caption, createdAt: created, sourceUrl, sourceKey, adult, audience, meta: extra, files: incoming, skipKnown: true });
     for (const r of result.rejected) {
