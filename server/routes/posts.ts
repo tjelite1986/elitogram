@@ -236,13 +236,15 @@ function resolveAuthor(req: Request, fields: Record<string, string>): Author {
 /**
  * A post inherits "general" from its creator, so putting a post under a creator
  * classified general is itself a classification: only a moderator (admin or the
- * profiles permission) may do it. Others keep posting under unclassified creators.
+ * profiles permission) may do it. Others keep posting under unclassified
+ * creators, and may post under a general creator when the post is 18+, since an
+ * 18+ post is never shown as general.
  */
-function assertMayAssignCreator(req: Request, creatorId: number | null, currentCreatorId: number | null): void {
-  if (!creatorId || creatorId === currentCreatorId) return;
+function assertMayAssignCreator(req: Request, creatorId: number | null, currentCreatorId: number | null, adult: boolean): void {
+  if (!creatorId || creatorId === currentCreatorId || adult) return;
   if (req.user!.role === 'admin' || can(req.user!, 'profiles')) return;
   const aud = db.prepare('SELECT audience FROM creators WHERE id = ?').pluck().get(creatorId);
-  if (aud === 'general') throw new HttpError(403, 'Only a moderator can post under a creator classified general');
+  if (aud === 'general') throw new HttpError(403, 'Only a moderator can post under a creator classified general; mark the post 18+ or ask a moderator');
 }
 
 posts.post(
@@ -252,7 +254,7 @@ posts.post(
     try {
       if (up.files.length === 0) throw new HttpError(400, 'Add at least one image or video');
       const author = resolveAuthor(req, up.fields);
-      assertMayAssignCreator(req, author.creatorId ?? null, null);
+      assertMayAssignCreator(req, author.creatorId ?? null, null, up.fields.adult === '1');
       const result = await createPost({
         author,
         uploaderId: req.user!.id,
@@ -296,7 +298,7 @@ posts.patch(
         if (!c) throw new HttpError(400, 'Unknown creator');
         author = { creatorId: c.id };
       }
-      assertMayAssignCreator(req, author.creatorId ?? null, row.creator_id);
+      assertMayAssignCreator(req, author.creatorId ?? null, row.creator_id, !!row.adult || body.adult === true);
     }
     let toRemove: number[] = [];
     if (Array.isArray(body.removeMedia) && body.removeMedia.length) {
@@ -369,6 +371,11 @@ posts.post(
     const row = loadVisiblePost(req, id);
     if (!row) throw new HttpError(404, 'Post not found');
     if (!canEditPost(req.user!, row)) throw new HttpError(403, 'Forbidden');
+    // A new item inherits the post's audience. On a post shown as general that
+    // would classify it, so only a moderator may add to such a post.
+    if (effectiveAudience(row) === 'general' && req.user!.role !== 'admin' && !can(req.user!, 'profiles')) {
+      throw new HttpError(403, 'Only a moderator can add media to a post classified general');
+    }
     const up = await parseUpload(req);
     try {
       const r = await addMediaToPost(id, up.files.map((f) => ({ abs: f.abs, name: f.name })));

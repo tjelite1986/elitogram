@@ -40,6 +40,17 @@ export function validateHandle(handle: string): string | null {
 }
 
 /** Resolves a path relative to the media root and refuses anything that escapes it. */
+/**
+ * A media row's identity beyond its SQLite id, which is reused after the
+ * highest row is purged. Derived files (thumbnails) and references (a creator
+ * picture cropped from a post) carry it, so a new row that inherits the id of
+ * a purged one never inherits what was derived from the old bytes.
+ */
+export function mediaIdentity(m: { id: number; sha256?: string | null; path: string; created_at: number }): string {
+  const basis = m.sha256 || `${m.path}|${m.created_at}`;
+  return `${m.id}-${crypto.createHash('sha256').update(basis).digest('hex').slice(0, 12)}`;
+}
+
 export function mediaAbs(rel: string): string {
   const root = config.mediaRoot;
   const abs = path.resolve(root, rel);

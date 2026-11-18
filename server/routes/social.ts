@@ -71,13 +71,15 @@ const CATEGORY_TTL = 60_000;
  * 15 ms on 45k posts). A cached answer is reused only while it is unchanged,
  * so a post or creator marked 18+ leaves the categories at once. The sums are
  * weighted by id so two opposite changes do not cancel out. A post's creator is
- * part of it, since a post inherits 18+ and general from whoever it belongs to.
+ * part of it, since a post inherits 18+ and general from whoever it belongs to;
+ * that term hashes each (creator, post) pair, because a linear weight lets two
+ * reassignments cancel out (posts 10 and 20 moving from creators 1 and 4 to 3).
  */
 function visibilityFingerprint(): string {
   return db
     .prepare(
       `SELECT
-         (SELECT COUNT(*) || ':' || TOTAL(adult * id) || ':' || TOTAL((audience = 'general') * id) || ':' || TOTAL(deleted * id) || ':' || TOTAL(IFNULL(creator_id, 0) * id) || ':' || IFNULL(MAX(id), 0) FROM posts) || '|' ||
+         (SELECT COUNT(*) || ':' || TOTAL(adult * id) || ':' || TOTAL((audience = 'general') * id) || ':' || TOTAL(deleted * id) || ':' || SUM((IFNULL(creator_id, 0) * 2654435761 + id * 40503) % 1048573) || ':' || IFNULL(MAX(id), 0) FROM posts) || '|' ||
          (SELECT COUNT(*) || ':' || TOTAL(adult * id) || ':' || TOTAL((audience = 'general') * id) || ':' || TOTAL(deleted * id) FROM creators) || '|' ||
          (SELECT COUNT(*) || ':' || TOTAL(missing * id) || ':' || TOTAL(post_id * id) FROM media) || '|' ||
          (SELECT COUNT(*) || ':' || TOTAL(post_id * hashtag_id) FROM post_hashtags)`,

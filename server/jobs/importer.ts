@@ -150,7 +150,8 @@ const SIDECAR_MAX_BYTES = 256 * 1024;
 async function readSidecarText(abs: string): Promise<string | null> {
   let fh: fsp.FileHandle | null = null;
   try {
-    fh = await fsp.open(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    // Non-blocking, so a FIFO planted under a sidecar name cannot stall the import.
+    fh = await fsp.open(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
     const st = await fh.stat();
     if (!st.isFile() || st.size > SIDECAR_MAX_BYTES) return null;
     const buf = Buffer.alloc(st.size);
@@ -183,7 +184,7 @@ async function fileMeta(f: PendingFile): Promise<FileMeta> {
   const shortcode = j.source === 'instagram' && typeof j.shortcode === 'string' && /^[\w-]{5,40}$/.test(j.shortcode) ? j.shortcode : null;
   return {
     sidecar: abs,
-    caption: String(j.caption ?? j.description ?? j.title ?? ''),
+    caption: [j.caption, j.description, j.title].find((v): v is string => typeof v === 'string') ?? '',
     shortcode,
     postUrl: typeof j.post_url === 'string' && /^https:\/\//.test(j.post_url) ? j.post_url : null,
     index: Number.isInteger(j.media_index) ? j.media_index : null,
@@ -301,6 +302,12 @@ export async function runImport(ctx: JobContext): Promise<string> {
       }
     }
     const existing = sourceKey ? (knownKey.get(sourceKey) as any) : undefined;
+    // 18+ only ever tightens, and it applies to the keyed post whatever happens
+    // to the delivery's files below: the post may have been reassigned to another
+    // creator since, and that must not discard the correction.
+    if (existing && adult && db.prepare('UPDATE posts SET adult = 1 WHERE id = ? AND adult = 0').run(existing.id).changes) {
+      ctx.log(`Marked post ${existing.id} 18+ from a redelivery of ${sourceKey}`);
+    }
     if (existing && existing.creator_id !== g.creatorId) {
       // The source key is the only link, so a delivery for another creator never joins this post.
       ctx.log(`Not added to post ${existing.id}: ${sourceKey} arrived for another creator`);
@@ -324,8 +331,8 @@ export async function runImport(ctx: JobContext): Promise<string> {
     if (existing) {
       // A redelivery or a late carousel item. 18+ only ever tightens: a
       // delivery that says 18+ marks the stored post, whatever came first.
-      // Never loosened here; general/unknown on a later file changes nothing.
-      if (adult) db.prepare('UPDATE posts SET adult = 1 WHERE id = ? AND adult = 0').run(existing.id);
+      // Never loosened here; general/unknown on a later file changes nothing
+      // (an 18+ delivery already marked the post above).
       // Items the post does not hold yet (by content) join it; the rest are done.
       const r = await addMediaToPost(existing.id, g.files.map(({ f }) => ({ abs: f.abs, name: path.basename(f.rel) })), true);
       if (r.added) {

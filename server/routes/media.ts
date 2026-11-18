@@ -5,7 +5,7 @@ import { db } from '../db/index.js';
 import { adultUnlocked } from '../auth.js';
 import { creatorScopeSql, effectiveAudience, isScoped, scopeAllows, scopeOf, scopeSql } from '../audience.js';
 import { ah, intParam } from '../http.js';
-import { mediaAbs } from '../media/files.js';
+import { mediaAbs, mediaIdentity } from '../media/files.js';
 import { thumbnail } from '../media/probe.js';
 import { fallbackAvatar, fallbackBanner, mimeFor, sendFile } from '../media/serve.js';
 
@@ -31,7 +31,7 @@ function notFound(res: Response): void {
 function loadMedia(req: Request, id: number): any {
   const m = db
     .prepare(
-      `SELECT m.id, m.path, m.kind, m.mime, m.missing, p.deleted, p.adult, p.audience, p.uploader_id, p.user_id,
+      `SELECT m.id, m.path, m.kind, m.mime, m.missing, m.sha256, m.created_at, p.deleted, p.adult, p.audience, p.uploader_id, p.user_id,
          c.adult AS c_adult, c.audience AS c_audience, c.deleted AS c_deleted, c.handle AS c_handle
        FROM media m JOIN posts p ON p.id = m.post_id LEFT JOIN creators c ON c.id = p.creator_id WHERE m.id = ?`,
     )
@@ -80,7 +80,7 @@ media.get(
     describe(res, m);
     try {
       const w = [320, 480, 1080].includes(Number(req.query.w)) ? Number(req.query.w) : 480;
-      const out = await thumbnail(m.path, m.kind, `m${m.id}`, w);
+      const out = await thumbnail(m.path, m.kind, `m${mediaIdentity(m)}`, w);
       sendFile(req, res, out, 'image/webp', 'private, max-age=604800');
     } catch {
       // No thumbnail possible: images fall back to the original, videos to a neutral tile.
@@ -126,16 +126,18 @@ function creatorPictureInScope(req: Request, id: number, source: string | null):
   if (!scope) return true;
   if (!source) return false;
   if (source !== 'profile' && source !== 'chosen') {
-    const m = /^post:(\d+)$/.exec(source);
+    // 'post:<media identity>': an id alone is not enough, because SQLite reuses
+    // the id of a purged row, so the identity must match the row's bytes too.
+    const m = /^post:((\d+)-[0-9a-f]{12})$/.exec(source);
     if (!m) return false;
     // The crop's own post must still exist, belong to this creator and be visible in this scope.
-    const ok = db
+    const row = db
       .prepare(
-        `SELECT 1 FROM media mx JOIN posts p ON p.id = mx.post_id LEFT JOIN creators c ON c.id = p.creator_id
+        `SELECT mx.id, mx.sha256, mx.path, mx.created_at FROM media mx JOIN posts p ON p.id = mx.post_id LEFT JOIN creators c ON c.id = p.creator_id
          WHERE mx.id = ? AND p.creator_id = ? AND p.deleted = 0 AND p.adult = 0 AND COALESCE(c.adult, 0) = 0 AND ${scopeSql(scope)}`,
       )
-      .get(Number(m[1]), id);
-    if (!ok) return false;
+      .get(Number(m[2]), id) as any;
+    if (!row || mediaIdentity(row) !== m[1]) return false;
   }
   return !!db
     .prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND c.adult = 0 AND ${creatorScopeSql(scope)} AND NOT EXISTS (SELECT 1 FROM posts pa WHERE pa.creator_id = c.id AND pa.adult = 1)`)

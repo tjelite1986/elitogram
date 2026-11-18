@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import sharp from 'sharp';
 import { config } from '../config.js';
 import { db, now } from '../db/index.js';
-import { APP_DIRS, mediaAbs, mediaRel, uniqueTarget } from '../media/files.js';
+import { APP_DIRS, mediaAbs, mediaIdentity, mediaRel, uniqueTarget } from '../media/files.js';
 import { dHash } from '../media/probe.js';
 import { indexPost } from '../library.js';
 import { cookieFor } from '../sync/cookies.js';
@@ -156,6 +156,12 @@ export async function purgePosts(ids: number[]): Promise<{ posts: number; files:
       else unlink.push(m.path);
     }
     db.transaction(() => {
+      // A creator picture cropped from this post loses its source and turns neutral in scoped reads.
+      for (const m of media) {
+        const ref = `post:${m.id}`;
+        db.prepare("UPDATE creators SET avatar_source = NULL WHERE avatar_source = ? OR avatar_source LIKE ? || '-%'").run(ref, ref);
+        db.prepare("UPDATE creators SET banner_source = NULL WHERE banner_source = ? OR banner_source LIKE ? || '-%'").run(ref, ref);
+      }
       db.prepare('DELETE FROM dup_members WHERE media_id IN (SELECT id FROM media WHERE post_id = ?)').run(id);
       db.prepare('DELETE FROM media WHERE post_id = ?').run(id);
       db.prepare('DELETE FROM posts WHERE id = ?').run(id);
@@ -281,11 +287,11 @@ export async function runAvatarBackfill(ctx: JobContext): Promise<string> {
       }
     }
     const m = db
-      .prepare("SELECT m.id, m.path FROM media m JOIN posts p ON p.id = m.post_id WHERE p.creator_id = ? AND p.deleted = 0 AND p.adult = 0 AND m.kind = 'image' AND m.missing = 0 ORDER BY p.created_at DESC LIMIT 1")
+      .prepare("SELECT m.id, m.path, m.sha256, m.created_at FROM media m JOIN posts p ON p.id = m.post_id WHERE p.creator_id = ? AND p.deleted = 0 AND p.adult = 0 AND m.kind = 'image' AND m.missing = 0 ORDER BY p.created_at DESC LIMIT 1")
       .get(c.id) as any;
     if (!m) continue;
     try {
-      db.prepare('UPDATE creators SET avatar_path = ?, avatar_source = ? WHERE id = ?').run(await squareAvatar(mediaAbs(m.path), `c${c.id}`), `post:${m.id}`, c.id);
+      db.prepare('UPDATE creators SET avatar_path = ?, avatar_source = ? WHERE id = ?').run(await squareAvatar(mediaAbs(m.path), `c${c.id}`), `post:${mediaIdentity(m)}`, c.id);
       fromPost++;
     } catch (err) {
       ctx.log(`${c.handle}: ${(err as Error).message}`);
