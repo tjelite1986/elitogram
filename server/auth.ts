@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { db, now } from './db/index.js';
 import { config } from './config.js';
+import { isScoped } from './audience.js';
 
 export const PERMISSIONS = ['import', 'duplicates', 'cleaning', 'profiles', 'sources', 'jobs', 'users'] as const;
 export type Permission = (typeof PERMISSIONS)[number];
@@ -160,7 +161,8 @@ export function adultUntil(req: Request): number | null {
   }
 }
 
-export const adultUnlocked = (req: Request): boolean => adultUntil(req) !== null;
+// A request narrowed to an audience scope (see audience.ts) never sees 18+.
+export const adultUnlocked = (req: Request): boolean => !isScoped(req) && adultUntil(req) !== null;
 
 /** SQL condition hiding adult posts; expects posts as `p` and creators LEFT JOINed as `c`. */
 export function adultFilter(req: Request): string {

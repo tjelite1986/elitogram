@@ -1,6 +1,7 @@
 import type { Request } from 'express';
 import { db } from './db/index.js';
 import { adultFilter } from './auth.js';
+import { effectiveAudience, scopeOf, scopeSql } from './audience.js';
 
 export const POST_FROM = `FROM posts p
   LEFT JOIN creators c ON c.id = p.creator_id
@@ -8,7 +9,7 @@ export const POST_FROM = `FROM posts p
 
 /** Base WHERE for anything a viewer may see: not deleted, not hidden by the 18+ gate. */
 export function visible(req: Request, includeDeleted = false): string {
-  return `${includeDeleted ? '1=1' : 'p.deleted = 0'} AND (c.id IS NULL OR c.deleted = 0) AND ${adultFilter(req)}
+  return `${includeDeleted ? '1=1' : 'p.deleted = 0'} AND (c.id IS NULL OR c.deleted = 0) AND ${adultFilter(req)} AND ${scopeSql(scopeOf(req))}
     AND EXISTS (SELECT 1 FROM media mx WHERE mx.post_id = p.id AND mx.missing = 0)`;
 }
 
@@ -38,7 +39,7 @@ export function authorOf(row: any) {
   return { type: 'user' as const, id: row.user_id, handle: row.u_username, name: row.u_name || row.u_username, avatar: `/m/ua/${row.user_id}`, adult: false };
 }
 
-export const POST_COLS = `p.id, p.creator_id, p.user_id, p.uploader_id, p.caption, p.created_at, p.source_url, p.adult, p.deleted,
+export const POST_COLS = `p.id, p.creator_id, p.user_id, p.uploader_id, p.caption, p.created_at, p.imported_at, p.source_url, p.adult, p.deleted, p.audience, p.meta, c.audience AS c_audience,
   c.handle AS c_handle, c.display_name AS c_name, c.adult AS c_adult, u.username AS u_username, u.display_name AS u_name`;
 
 export function mediaOf(postIds: number[]): Map<number, any[]> {
@@ -46,12 +47,12 @@ export function mediaOf(postIds: number[]): Map<number, any[]> {
   if (postIds.length === 0) return out;
   const rows = db
     .prepare(
-      `SELECT id, post_id, kind, mime, width, height, duration FROM media WHERE missing = 0 AND post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY position, id`,
+      `SELECT id, post_id, kind, mime, width, height, duration, size FROM media WHERE missing = 0 AND post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY position, id`,
     )
     .all(...postIds) as any[];
   for (const r of rows) {
     const list = out.get(r.post_id) ?? [];
-    list.push({ id: r.id, kind: r.kind, mime: r.mime, width: r.width, height: r.height, duration: r.duration, url: `/m/${r.id}`, thumb: `/m/${r.id}/t` });
+    list.push({ id: r.id, kind: r.kind, mime: r.mime, width: r.width, height: r.height, duration: r.duration, size: r.size, url: `/m/${r.id}`, thumb: `/m/${r.id}/t` });
     out.set(r.post_id, list);
   }
   return out;
@@ -66,6 +67,7 @@ export function hydratePosts(rows: any[], userId: number): any[] {
   const likes = new Map((db.prepare(`SELECT post_id, COUNT(*) n FROM likes WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids) as any[]).map((r) => [r.post_id, r.n]));
   const comments = new Map((db.prepare(`SELECT post_id, COUNT(*) n FROM comments WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids) as any[]).map((r) => [r.post_id, r.n]));
   const mine = new Set(db.prepare(`SELECT post_id FROM likes WHERE user_id = ? AND post_id IN (${ph})`).pluck().all(userId, ...ids) as number[]);
+  const faves = new Set(db.prepare(`SELECT post_id FROM favorites WHERE user_id = ? AND post_id IN (${ph})`).pluck().all(userId, ...ids) as number[]);
   return rows.map((r) => ({
     id: r.id,
     caption: r.caption,
@@ -79,17 +81,52 @@ export function hydratePosts(rows: any[], userId: number): any[] {
     like_count: likes.get(r.id) ?? 0,
     comment_count: comments.get(r.id) ?? 0,
     liked: mine.has(r.id),
+    favorited: faves.has(r.id),
+    audience: effectiveAudience(r),
+    imported_at: r.imported_at,
+    meta: parseMeta(r.meta),
   }));
 }
 
-/** Compact tiles for grids: first media plus counts. */
+/** Grabbit's delivery metadata (platform, original tags, download date); null when absent or unreadable. */
+export function parseMeta(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== 'string' || !raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Author and audience of each post, for grid tiles. */
+function tileFacts(ids: number[]): Map<number, any> {
+  const out = new Map<number, any>();
+  if (ids.length === 0) return out;
+  const rows = db
+    .prepare(
+      `SELECT p.id, p.adult, p.audience, p.creator_id, c.adult AS c_adult, c.audience AS c_audience, c.handle AS c_handle, u.username AS u_username
+       ${POST_FROM} WHERE p.id IN (${ids.map(() => '?').join(',')})`,
+    )
+    .all(...ids) as any[];
+  for (const r of rows) out.set(r.id, { audience: effectiveAudience(r), creator_id: r.creator_id ?? null, author_handle: r.c_handle ?? r.u_username ?? null, author_type: r.creator_id ? 'creator' : 'user' });
+  return out;
+}
+
+/** Compact tiles for grids: first media plus counts, author and audience. */
 export function gridTiles(rows: any[]): any[] {
-  const media = mediaOf(rows.map((r) => r.id));
+  const ids = rows.map((r) => r.id);
+  const media = mediaOf(ids);
+  const facts = tileFacts(ids);
   return rows
     .map((r) => {
       const m = media.get(r.id) ?? [];
       if (m.length === 0) return null;
-      return { id: r.id, media_id: m[0].id, kind: m[0].kind, thumb: m[0].thumb, count: m.length, has_video: m.some((x) => x.kind === 'video'), created_at: r.created_at };
+      const f = facts.get(r.id) ?? { audience: 'unknown', creator_id: null, author_handle: null, author_type: 'user' };
+      return {
+        id: r.id, media_id: m[0].id, kind: m[0].kind, thumb: m[0].thumb, width: m[0].width, height: m[0].height,
+        count: m.length, has_video: m.some((x) => x.kind === 'video'), created_at: r.created_at, ...f,
+      };
     })
     .filter(Boolean);
 }

@@ -2,6 +2,7 @@ import { Router, type Request } from 'express';
 import { db, now } from '../db/index.js';
 import { adultFilter, adultUnlocked, can, type SessionUser } from '../auth.js';
 import { ah, HttpError, intParam, str } from '../http.js';
+import { creatorScopeSql, parseClassify, scopeOf, scopeSql } from '../audience.js';
 import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles } from '../views.js';
 import { parseUpload } from '../media/upload.js';
 import { addMediaToPost, createPost, findCreatorByName, indexPost, moveMediaToAuthor, parseMentions, setPostHashtags, type Author } from '../library.js';
@@ -51,9 +52,31 @@ export function ftsQuery(q: string): string | null {
   return terms.length ? terms.map((t) => `"${t}"*`).join(' ') : null;
 }
 
+/** First visible media item of post `p`, for kind and orientation filters. */
+const FIRST_MEDIA = 'SELECT {col} FROM media mf WHERE mf.post_id = p.id AND mf.missing = 0 ORDER BY mf.position, mf.id LIMIT 1';
+
+/**
+ * Optional explore facets: `kind` (image|video: any video in the post makes it
+ * a video post) and `orient` (portrait|landscape|square, from the first item;
+ * within 10% counts as square). Unknown values are ignored.
+ */
+export function facetSql(query: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const hasVideo = "EXISTS (SELECT 1 FROM media mv WHERE mv.post_id = p.id AND mv.missing = 0 AND mv.kind = 'video')";
+  if (query.kind === 'video') parts.push(hasVideo);
+  else if (query.kind === 'image') parts.push(`NOT ${hasVideo}`);
+  const w = `(${FIRST_MEDIA.replace('{col}', 'mf.width')})`;
+  const h = `(${FIRST_MEDIA.replace('{col}', 'mf.height')})`;
+  if (query.orient === 'portrait') parts.push(`${h} > ${w} * 1.1`);
+  else if (query.orient === 'landscape') parts.push(`${w} > ${h} * 1.1`);
+  else if (query.orient === 'square') parts.push(`${w} > 0 AND ${h} > 0 AND ${w} <= ${h} * 1.1 AND ${h} <= ${w} * 1.1`);
+  return parts.length ? parts.join(' AND ') : '1=1';
+}
+
 posts.get('/explore', (req, res) => {
   const q = str(req.query.q, 200).trim();
   const cur = cursorSql(parseCursor(req.query.cursor));
+  const facets = facetSql(req.query);
   let rows: any[];
   if (q) {
     const fts = ftsQuery(q);
@@ -63,13 +86,13 @@ posts.get('/explore', (req, res) => {
     }
     rows = db
       .prepare(
-        `SELECT p.id, p.created_at ${POST_FROM} WHERE p.id IN (SELECT rowid FROM search_fts WHERE search_fts MATCH ?) AND ${visible(req)} AND ${cur.sql}
+        `SELECT p.id, p.created_at ${POST_FROM} WHERE p.id IN (SELECT rowid FROM search_fts WHERE search_fts MATCH ?) AND ${visible(req)} AND ${facets} AND ${cur.sql}
          ORDER BY p.created_at DESC, p.id DESC LIMIT ${GRID}`,
       )
       .all(fts, ...cur.args) as any[];
   } else {
     rows = db
-      .prepare(`SELECT p.id, p.created_at ${POST_FROM} WHERE ${visible(req)} AND ${cur.sql} ORDER BY p.created_at DESC, p.id DESC LIMIT ${GRID}`)
+      .prepare(`SELECT p.id, p.created_at ${POST_FROM} WHERE ${visible(req)} AND ${facets} AND ${cur.sql} ORDER BY p.created_at DESC, p.id DESC LIMIT ${GRID}`)
       .all(...cur.args) as any[];
   }
   res.json({ items: gridTiles(rows), next: nextCursor(rows, GRID) });
@@ -83,18 +106,23 @@ posts.get('/search', (req, res) => {
   }
   const like = `%${q.replace(/[%_\\]/g, (m) => '\\' + m)}%`;
   const adult = adultUnlocked(req) ? '' : 'AND c.adult = 0';
+  const scope = scopeOf(req);
   const creators = db
     .prepare(
-      `SELECT c.id, c.handle, c.display_name FROM creators c WHERE c.deleted = 0 ${adult} AND (c.handle LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\'
+      `SELECT c.id, c.handle, c.display_name FROM creators c WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scope)} AND (c.handle LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\'
         OR EXISTS (SELECT 1 FROM creator_aliases a WHERE a.creator_id = c.id AND a.alias LIKE ? ESCAPE '\\'))
        ORDER BY (c.handle = ?) DESC, length(c.handle) LIMIT 8`,
     )
     .all(like, like, like, q.toLowerCase()) as any[];
+  // A scoped request counts (and so offers) only tags on posts it may see.
+  const tagSql = scope
+    ? `SELECT h.tag, COUNT(p.id) AS n FROM hashtags h JOIN post_hashtags ph ON ph.hashtag_id = h.id JOIN posts p ON p.id = ph.post_id
+       LEFT JOIN creators c ON c.id = p.creator_id WHERE h.tag LIKE ? ESCAPE '\\' AND p.deleted = 0 AND (c.id IS NULL OR c.deleted = 0) AND ${adultFilter(req)} AND ${scopeSql(scope)}
+       GROUP BY h.id HAVING n > 0 ORDER BY n DESC LIMIT 8`
+    : `SELECT h.tag, COUNT(ph.post_id) AS n FROM hashtags h JOIN post_hashtags ph ON ph.hashtag_id = h.id WHERE h.tag LIKE ? ESCAPE '\\'
+       GROUP BY h.id ORDER BY n DESC LIMIT 8`;
   const tags = db
-    .prepare(
-      `SELECT h.tag, COUNT(ph.post_id) AS n FROM hashtags h JOIN post_hashtags ph ON ph.hashtag_id = h.id WHERE h.tag LIKE ? ESCAPE '\\'
-       GROUP BY h.id ORDER BY n DESC LIMIT 8`,
-    )
+    .prepare(tagSql)
     .all(`${q.toLowerCase().replace(/[%_\\]/g, (m) => '\\' + m)}%`) as any[];
   res.json({ creators: creators.map((c) => ({ ...c, avatar: `/m/ca/${c.id}` })), tags });
 });
@@ -138,7 +166,7 @@ posts.get('/hashtags', (req, res) => {
   const rows = db
     .prepare(
       `SELECT h.tag, COUNT(p.id) AS n FROM hashtags h JOIN post_hashtags ph ON ph.hashtag_id = h.id JOIN posts p ON p.id = ph.post_id
-       LEFT JOIN creators c ON c.id = p.creator_id WHERE p.deleted = 0 AND (c.id IS NULL OR c.deleted = 0) AND ${adultFilter(req)}
+       LEFT JOIN creators c ON c.id = p.creator_id WHERE p.deleted = 0 AND (c.id IS NULL OR c.deleted = 0) AND ${adultFilter(req)} AND ${scopeSql(scopeOf(req))}
        GROUP BY h.id HAVING n > 0 ORDER BY n DESC, h.tag LIMIT 500`,
     )
     .all() as any[];
@@ -153,16 +181,22 @@ posts.get('/hashtags/:tag', (req, res) => {
        WHERE h.tag = ? AND ${visible(req)} AND ${cur.sql} ORDER BY p.created_at DESC, p.id DESC LIMIT ${GRID}`,
     )
     .all(req.params.tag.toLowerCase(), ...cur.args) as any[];
-  const total = db.prepare('SELECT COUNT(*) FROM post_hashtags ph JOIN hashtags h ON h.id = ph.hashtag_id WHERE h.tag = ?').pluck().get(req.params.tag.toLowerCase());
+  // A scoped total counts only what the scope can see, so it never hints at hidden posts.
+  const total = scopeOf(req)
+    ? db
+        .prepare(`SELECT COUNT(*) ${POST_FROM} JOIN post_hashtags ph ON ph.post_id = p.id JOIN hashtags h ON h.id = ph.hashtag_id WHERE h.tag = ? AND ${visible(req)}`)
+        .pluck()
+        .get(req.params.tag.toLowerCase())
+    : db.prepare('SELECT COUNT(*) FROM post_hashtags ph JOIN hashtags h ON h.id = ph.hashtag_id WHERE h.tag = ?').pluck().get(req.params.tag.toLowerCase());
   res.json({ tag: req.params.tag.toLowerCase(), total, items: gridTiles(rows), next: nextCursor(rows, GRID) });
 });
 
 posts.get('/mentions', (req, res) => {
   const q = str(req.query.q, 60).toLowerCase().replace(/[%_\\]/g, '');
   const users = db.prepare("SELECT 'user' AS type, id, username AS handle, display_name AS name FROM users WHERE disabled = 0 AND username LIKE ? LIMIT 5").all(`${q}%`) as any[];
-  const adult = adultUnlocked(req) ? '' : 'AND adult = 0';
+  const adult = adultUnlocked(req) ? '' : 'AND c.adult = 0';
   const creators = db
-    .prepare(`SELECT 'creator' AS type, id, handle, display_name AS name FROM creators WHERE deleted = 0 ${adult} AND (handle LIKE ? OR display_name LIKE ?) LIMIT 8`)
+    .prepare(`SELECT 'creator' AS type, c.id, c.handle, c.display_name AS name FROM creators c WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scopeOf(req))} AND (c.handle LIKE ? OR c.display_name LIKE ?) LIMIT 8`)
     .all(`${q}%`, `${q}%`) as any[];
   res.json({
     items: [...users.map((u) => ({ ...u, avatar: `/m/ua/${u.id}` })), ...creators.map((c) => ({ ...c, avatar: `/m/ca/${c.id}` }))],
@@ -231,6 +265,13 @@ posts.patch(
       notifyMentions(caption, req.user!, id, 'post');
     }
     if (typeof body.adult === 'boolean') db.prepare('UPDATE posts SET adult = ? WHERE id = ?').run(body.adult ? 1 : 0, id);
+    if (body.audience !== undefined) {
+      // 'adult' sets the 18+ flag; general/unknown only change the audience and never clear 18+.
+      const a = parseClassify(body.audience);
+      if (!a) throw new HttpError(400, 'audience must be general, unknown or adult');
+      if (a === 'adult') db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
+      else db.prepare('UPDATE posts SET audience = ? WHERE id = ?').run(a, id);
+    }
     if (body.author && typeof body.author === 'object') {
       let author: Author;
       if (body.author.self) author = { userId: req.user!.id };
@@ -261,7 +302,13 @@ posts.patch(
       db.transaction(() => (body.order as unknown[]).forEach((mid, i) => upd.run(i, Number(mid), id)))();
     }
     indexPost(id);
-    const [post] = hydratePosts([loadVisiblePost(req, id, true)], req.user!.id);
+    const after = loadVisiblePost(req, id, true);
+    // Reclassifying can move a post out of the caller's scope; say so instead of failing.
+    if (!after) {
+      res.json({ id, out_of_scope: true, can_edit: true });
+      return;
+    }
+    const [post] = hydratePosts([after], req.user!.id);
     res.json({ ...post, can_edit: true });
   }),
 );

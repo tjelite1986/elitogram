@@ -219,4 +219,45 @@ export const migrations: string[] = [
   `,
   // Imports once stored file mtimes with fractional milliseconds, which broke paging.
   `UPDATE posts SET created_at = CAST(ROUND(created_at) AS INTEGER) WHERE typeof(created_at) = 'real';`,
+  // Grabbit 3.0 phase 2 (additive only): an audience per creator, post and
+  // story ('unknown' until someone classifies it by hand; 18+ stays the adult
+  // flag), Grabbit's delivery metadata per post, and the viewer's collections,
+  // favorites and viewing history. Older images ignore the new columns.
+  `
+  ALTER TABLE creators ADD COLUMN audience TEXT NOT NULL DEFAULT 'unknown';
+  ALTER TABLE posts ADD COLUMN audience TEXT NOT NULL DEFAULT 'unknown';
+  ALTER TABLE posts ADD COLUMN meta TEXT;
+  ALTER TABLE stories ADD COLUMN audience TEXT NOT NULL DEFAULT 'unknown';
+
+  CREATE TABLE collections (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (user_id, name)
+  );
+  CREATE TABLE collection_items (
+    collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (collection_id, post_id)
+  );
+  CREATE INDEX collection_items_post ON collection_items(post_id);
+  CREATE TABLE favorites (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, post_id)
+  );
+  CREATE INDEX favorites_user ON favorites(user_id, created_at DESC);
+  CREATE TABLE post_views (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    viewed_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, post_id)
+  );
+  CREATE INDEX post_views_user ON post_views(user_id, viewed_at DESC);
+  CREATE INDEX creators_audience ON creators(audience);
+  `,
 ];

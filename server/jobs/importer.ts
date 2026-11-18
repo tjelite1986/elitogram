@@ -115,6 +115,27 @@ interface FileMeta {
   shortcode: string | null;
   postUrl: string | null;
   index: number | null;
+  /** Grabbit deliveries: a stable post key (groups a carousel, dedups re-deliveries), audience and metadata. */
+  postKey: string | null;
+  audience: 'general' | 'unknown' | 'adult' | null;
+  extra: Record<string, unknown> | null;
+}
+
+/** Keeps the fields Grabbit may deliver in `meta`, bounded in size. */
+function cleanExtra(v: unknown): Record<string, unknown> | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const j = v as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  const s = (x: unknown, max: number) => (typeof x === 'string' && x.trim() ? x.trim().slice(0, max) : undefined);
+  out.platform = s(j.platform, 40);
+  out.origin = s(j.origin, 40);
+  out.downloaded_at = s(j.downloaded_at, 40);
+  if (Array.isArray(j.tags)) {
+    const tags = j.tags.map((t) => s(t, 60)).filter(Boolean).slice(0, 30);
+    if (tags.length) out.tags = tags;
+  }
+  for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
+  return Object.keys(out).length ? out : null;
 }
 
 async function readJson(abs: string): Promise<any> {
@@ -129,7 +150,7 @@ async function readJson(abs: string): Promise<any> {
 async function fileMeta(f: PendingFile): Promise<FileMeta> {
   const abs = f.abs.replace(/\.[^.]+$/, '.json');
   const j = fs.existsSync(abs) ? await readJson(abs) : null;
-  if (!j || typeof j !== 'object') return { sidecar: null, caption: '', shortcode: null, postUrl: null, index: null };
+  if (!j || typeof j !== 'object') return { sidecar: null, caption: '', shortcode: null, postUrl: null, index: null, postKey: null, audience: null, extra: null };
   const shortcode = j.source === 'instagram' && typeof j.shortcode === 'string' && /^[\w-]{5,40}$/.test(j.shortcode) ? j.shortcode : null;
   return {
     sidecar: abs,
@@ -137,6 +158,9 @@ async function fileMeta(f: PendingFile): Promise<FileMeta> {
     shortcode,
     postUrl: typeof j.post_url === 'string' && /^https:\/\//.test(j.post_url) ? j.post_url : null,
     index: Number.isInteger(j.media_index) ? j.media_index : null,
+    postKey: typeof j.post_key === 'string' && /^[\w.:-]{1,200}$/.test(j.post_key) ? j.post_key : null,
+    audience: j.audience === 'general' || j.audience === 'unknown' || j.audience === 'adult' ? j.audience : null,
+    extra: cleanExtra(j.meta),
   };
 }
 
@@ -200,7 +224,7 @@ export async function runImport(ctx: JobContext): Promise<string> {
   const files = await scanImportDir();
   const ready = files.filter((f) => !f.young && MEDIA_EXT.test(f.rel));
   const young = files.filter((f) => f.young).length;
-  const groups = new Map<string, { creatorId: number; files: { f: PendingFile; meta: FileMeta }[]; dir: string; key: string; shortcode: string | null }>();
+  const groups = new Map<string, { creatorId: number; files: { f: PendingFile; meta: FileMeta }[]; dir: string; key: string; shortcode: string | null; postKey: string | null }>();
   const unmatched: string[] = [];
   let newCreators = 0;
   for (const f of ready) {
@@ -215,10 +239,10 @@ export async function runImport(ctx: JobContext): Promise<string> {
     }
     const stem = path.basename(f.rel).replace(/\.[^.]+$/, '');
     const meta = await fileMeta(f);
-    // Carousel items carry their own media id in the file name, so the post shortcode groups them.
-    const key = meta.shortcode ? `ig:${meta.shortcode}` : groupKey(stem);
+    // Carousel items carry their own media id in the file name, so the post shortcode (or Grabbit's post key) groups them.
+    const key = meta.shortcode ? `ig:${meta.shortcode}` : meta.postKey ? `grabbit:${meta.postKey}` : groupKey(stem);
     const gk = `${r.id}|${path.dirname(f.rel)}|${key}`;
-    const g = groups.get(gk) ?? { creatorId: r.id, files: [], dir: path.dirname(f.abs), key, shortcode: meta.shortcode };
+    const g = groups.get(gk) ?? { creatorId: r.id, files: [], dir: path.dirname(f.abs), key, shortcode: meta.shortcode, postKey: meta.postKey };
     g.files.push({ f, meta });
     groups.set(gk, g);
   }
@@ -232,7 +256,7 @@ export async function runImport(ctx: JobContext): Promise<string> {
     if (ctx.stopped()) break;
     g.files.sort((a, b) => (a.meta.index ?? 0) - (b.meta.index ?? 0) || a.f.rel.localeCompare(b.f.rel, undefined, { numeric: true }));
     for (const { meta } of g.files) if (meta.sidecar) sidecars.add(meta.sidecar);
-    const sourceKey = g.shortcode ? `ig:${g.shortcode}` : null;
+    const sourceKey = g.shortcode ? `ig:${g.shortcode}` : g.postKey ? `grabbit:${g.postKey}` : null;
     if (sourceKey && knownKey.get(sourceKey)) {
       known++;
       for (const { f } of g.files) await setAside(f.abs, DONE_DIR);
@@ -242,7 +266,12 @@ export async function runImport(ctx: JobContext): Promise<string> {
     const incoming: IncomingFile[] = g.files.map(({ f }) => ({ abs: f.abs, name: path.basename(f.rel) }));
     const created = dateFromName(path.basename(g.files[0].f.rel)) ?? Math.min(...g.files.map(({ f }) => f.mtime));
     const sourceUrl = g.files.map((x) => x.meta.postUrl).find(Boolean) ?? null;
-    const result = await createPost({ author: { creatorId: g.creatorId }, caption, createdAt: created, sourceUrl, sourceKey, files: incoming, skipKnown: true });
+    // Grabbit's audience: 18+ sets the flag, general marks the post; anything else stays unknown.
+    const audiences = g.files.map((x) => x.meta.audience);
+    const adult = audiences.includes('adult');
+    const audience = !adult && audiences.includes('general') ? 'general' : 'unknown';
+    const extra = g.files.map((x) => x.meta.extra).find(Boolean) ?? null;
+    const result = await createPost({ author: { creatorId: g.creatorId }, caption, createdAt: created, sourceUrl, sourceKey, adult, audience, meta: extra, files: incoming, skipKnown: true });
     for (const r of result.rejected) {
       rejected++;
       ctx.log(`Rejected ${r.name}: ${r.reason}`);

@@ -12,6 +12,7 @@ import { account } from './routes/account.js';
 import { posts } from './routes/posts.js';
 import { creators } from './routes/creators.js';
 import { stories } from './routes/stories.js';
+import { social } from './routes/social.js';
 import { media } from './routes/media.js';
 import { admin } from './routes/admin.js';
 import { registerJob, startScheduler, warnIfBackupDisabled } from './jobs/scheduler.js';
@@ -63,7 +64,7 @@ app.get('/healthz', (_req, res) => {
 });
 
 app.use('/api', account);
-app.use('/api', requireUser, posts, creators, stories);
+app.use('/api', requireUser, posts, creators, stories, social);
 app.use('/api/admin', requireUser, admin);
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Not found' });

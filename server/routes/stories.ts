@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db, now } from '../db/index.js';
 import { adultUnlocked } from '../auth.js';
+import { parseClassify, scopeOf } from '../audience.js';
 import { ah, HttpError, intParam } from '../http.js';
 import { parseUpload } from '../media/upload.js';
 import { APP_DIRS, mediaRel, moveFile, sniffFile, uniqueTarget } from '../media/files.js';
@@ -12,19 +13,21 @@ const DAY = 86_400_000;
 
 stories.get('/stories', (req, res) => {
   const adult = adultUnlocked(req) ? '' : 'AND s.adult = 0';
+  const scope = scopeOf(req);
+  const scoped = scope === 'general' ? "AND s.audience = 'general'" : scope === 'unknown' ? "AND s.audience <> 'general'" : '';
   const rows = db
     .prepare(
-      `SELECT s.id, s.user_id, s.kind, s.adult, s.created_at, s.expires_at, u.username, u.display_name,
+      `SELECT s.id, s.user_id, s.kind, s.adult, s.audience, s.created_at, s.expires_at, u.username, u.display_name,
          EXISTS (SELECT 1 FROM story_views v WHERE v.story_id = s.id AND v.user_id = ?) AS seen
        FROM stories s JOIN users u ON u.id = s.user_id
-       WHERE s.expired = 0 AND s.expires_at > ? ${adult}
+       WHERE s.expired = 0 AND s.expires_at > ? ${adult} ${scoped}
        ORDER BY s.created_at`,
     )
     .all(req.user!.id, now()) as any[];
   const groups = new Map<number, any>();
   for (const r of rows) {
     const g = groups.get(r.user_id) ?? { user: { id: r.user_id, username: r.username, name: r.display_name || r.username, avatar: `/m/ua/${r.user_id}` }, items: [] };
-    g.items.push({ id: r.id, kind: r.kind, url: `/m/s/${r.id}`, created_at: r.created_at, expires_at: r.expires_at, seen: !!r.seen, adult: !!r.adult });
+    g.items.push({ id: r.id, kind: r.kind, url: `/m/s/${r.id}`, created_at: r.created_at, expires_at: r.expires_at, seen: !!r.seen, adult: !!r.adult, audience: r.adult ? 'adult' : r.audience === 'general' ? 'general' : 'unknown' });
     groups.set(r.user_id, g);
   }
   const list = [...groups.values()].map((g) => ({ ...g, all_seen: g.items.every((i: any) => i.seen), mine: g.user.id === req.user!.id }));
@@ -46,8 +49,8 @@ stories.post(
       await moveFile(f.abs, dest);
       const t = now();
       const r = db
-        .prepare('INSERT INTO stories (user_id, kind, mime, path, adult, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(req.user!.id, s.kind, s.mime, mediaRel(dest), up.fields.adult === '1' ? 1 : 0, t, t + DAY);
+        .prepare('INSERT INTO stories (user_id, kind, mime, path, adult, audience, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(req.user!.id, s.kind, s.mime, mediaRel(dest), up.fields.adult === '1' ? 1 : 0, parseClassify(up.fields.audience) === 'general' ? 'general' : 'unknown', t, t + DAY);
       const others = db.prepare('SELECT id FROM users WHERE id != ? AND disabled = 0').pluck().all(req.user!.id) as number[];
       for (const uid of others) {
         notify({ userId: uid, kind: 'story', actorId: req.user!.id, text: `${req.user!.display_name || req.user!.username} added a story`, url: '/' });

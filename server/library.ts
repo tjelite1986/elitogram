@@ -115,6 +115,8 @@ export interface CreatePostInput {
   sourceUrl?: string | null;
   sourceKey?: string | null;
   adult?: boolean;
+  audience?: 'general' | 'unknown';
+  meta?: Record<string, unknown> | null;
   files: IncomingFile[];
   skipKnown?: boolean; // skip files whose bytes are already in the library
 }
@@ -156,8 +158,8 @@ export async function createPost(input: CreatePostInput): Promise<CreatePostResu
       const caption = (input.caption ?? '').slice(0, 5000);
       const res = db
         .prepare(
-          `INSERT INTO posts (creator_id, user_id, uploader_id, caption, created_at, imported_at, source_url, source_key, adult)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO posts (creator_id, user_id, uploader_id, caption, created_at, imported_at, source_url, source_key, adult, audience, meta)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.author.creatorId ?? null,
@@ -170,6 +172,8 @@ export async function createPost(input: CreatePostInput): Promise<CreatePostResu
           input.sourceUrl ?? null,
           input.sourceKey ?? null,
           input.adult ? 1 : 0,
+          input.audience === 'general' ? 'general' : 'unknown',
+          input.meta ? JSON.stringify(input.meta) : null,
         );
       const id = Number(res.lastInsertRowid);
       const insMedia = db.prepare(

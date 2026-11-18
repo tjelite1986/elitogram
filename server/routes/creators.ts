@@ -2,10 +2,11 @@ import { Router, type Request } from 'express';
 import { db, now } from '../db/index.js';
 import { adultUnlocked, can, requirePerm } from '../auth.js';
 import { ah, HttpError, str } from '../http.js';
+import { creatorScopeSql, parseClassify, scopeOf, scopeSql } from '../audience.js';
 import { parseCursor, cursorSql, nextCursor, gridTiles, POST_FROM, visible } from '../views.js';
 import { parseUpload } from '../media/upload.js';
 import { APP_DIRS, isReservedName, mediaRel, sniffFile, uniqueTarget, moveFile, validateHandle } from '../media/files.js';
-import { createCreator, MediaRejected, moveMediaToAuthor, reindexCreator } from '../library.js';
+import { createCreator, findCreatorByName, MediaRejected, moveMediaToAuthor, reindexCreator } from '../library.js';
 import { notify } from '../notify.js';
 
 export const creators = Router();
@@ -14,6 +15,8 @@ function loadCreator(req: Request, handle: string): any {
   const c = db.prepare('SELECT * FROM creators WHERE handle = ? AND deleted = 0').get(handle.toLowerCase()) as any;
   if (!c) throw new HttpError(404, 'Profile not found');
   if (c.adult && !adultUnlocked(req)) throw new HttpError(404, 'Profile not found');
+  const scope = scopeOf(req);
+  if (scope && !db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${creatorScopeSql(scope)}`).get(c.id)) throw new HttpError(404, 'Profile not found');
   return c;
 }
 
@@ -43,6 +46,7 @@ function creatorJson(req: Request, c: any) {
     has_avatar: !!c.avatar_path,
     has_banner: !!c.banner_path,
     adult: !!c.adult,
+    audience: c.adult ? 'adult' : c.audience === 'general' ? 'general' : 'unknown',
     post_count: counts.posts,
     follower_count: followers,
     following,
@@ -62,22 +66,77 @@ creators.get('/creators', (req, res) => {
   const limit = 60;
   const adult = adultUnlocked(req) ? '' : 'AND c.adult = 0';
   const adultPost = adultUnlocked(req) ? '' : 'AND p.adult = 0';
+  const scope = scopeOf(req);
+  // Scoped counts include only posts the scope can see (the derived table joins its own creators row).
+  const scopePost = scope ? `AND ${scopeSql(scope)}` : '';
   const filter = q ? "AND (c.handle LIKE ? OR c.display_name LIKE ? OR EXISTS (SELECT 1 FROM creator_aliases a WHERE a.creator_id = c.id AND a.alias LIKE ?))" : '';
   const args = q ? [`%${q}%`, `%${q}%`, `%${q}%`] : [];
   const rows = db
     .prepare(
-      `SELECT c.id, c.handle, c.display_name, c.adult, COALESCE(pc.n, 0) AS post_count, pc.latest
+      `SELECT c.id, c.handle, c.display_name, c.adult, c.audience, COALESCE(pc.n, 0) AS post_count, pc.latest
        FROM creators c
-       LEFT JOIN (SELECT p.creator_id, COUNT(*) AS n, MAX(p.created_at) AS latest FROM posts p WHERE p.deleted = 0 ${adultPost} GROUP BY p.creator_id) pc ON pc.creator_id = c.id
-       WHERE c.deleted = 0 ${adult} ${filter}
+       LEFT JOIN (SELECT p.creator_id, COUNT(*) AS n, MAX(p.created_at) AS latest FROM posts p LEFT JOIN creators c ON c.id = p.creator_id
+                  WHERE p.deleted = 0 ${adultPost} ${scopePost} GROUP BY p.creator_id) pc ON pc.creator_id = c.id
+       WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scope)} ${filter}
        ORDER BY (COALESCE(pc.n, 0) > 0) DESC, pc.latest DESC, c.handle
        LIMIT ${limit} OFFSET ${offset}`,
     )
     .all(...args) as any[];
+  // samples=1 adds up to three recent tiles per creator (the review lane classifies from them).
+  const samples = req.query.samples === '1';
+  const sampleStmt = samples
+    ? db.prepare(`SELECT p.id, p.created_at ${POST_FROM} WHERE p.creator_id = ? AND ${visible(req)} ORDER BY p.created_at DESC, p.id DESC LIMIT 3`)
+    : null;
   res.json({
-    items: rows.map((r) => ({ id: r.id, handle: r.handle, display_name: r.display_name, adult: !!r.adult, post_count: r.post_count, avatar: `/m/ca/${r.id}` })),
+    items: rows.map((r) => ({
+      id: r.id,
+      handle: r.handle,
+      display_name: r.display_name,
+      adult: !!r.adult,
+      audience: r.adult ? 'adult' : r.audience === 'general' ? 'general' : 'unknown',
+      post_count: r.post_count,
+      avatar: `/m/ca/${r.id}`,
+      ...(sampleStmt ? { samples: gridTiles(sampleStmt.all(r.id) as any[]) } : {}),
+    })),
     next: rows.length === limit ? offset + limit : null,
   });
+});
+
+/**
+ * Classifies creators in bulk: { handles: string[], audience: general|unknown|adult }.
+ * 'adult' sets the 18+ flag. An 18+ creator is never downgraded here; it is
+ * reported as skipped (as "not found" to a scoped caller, which may not know it exists).
+ */
+creators.post('/creators-classify', requirePerm('profiles'), (req, res) => {
+  const audience = parseClassify(req.body?.audience);
+  if (!audience) throw new HttpError(400, 'audience must be general, unknown or adult');
+  const raw = Array.isArray(req.body?.handles) ? (req.body.handles as unknown[]) : [];
+  const handles = [...new Set(raw.map((h) => str(h, 80).trim().toLowerCase().replace(/^@/, '')).filter(Boolean))];
+  if (handles.length === 0 || handles.length > 500) throw new HttpError(400, 'Send 1 to 500 handles');
+  const scoped = !!scopeOf(req);
+  const updated: string[] = [];
+  const skipped: { handle: string; reason: string }[] = [];
+  db.transaction(() => {
+    for (const h of handles) {
+      const hit = findCreatorByName(h);
+      const c = hit ? (db.prepare('SELECT id, handle, adult, audience FROM creators WHERE id = ? AND deleted = 0').get(hit.id) as any) : undefined;
+      if (!c || (c.adult && scoped)) {
+        skipped.push({ handle: h, reason: 'not found' });
+        continue;
+      }
+      if (audience === 'adult') {
+        db.prepare('UPDATE creators SET adult = 1 WHERE id = ?').run(c.id);
+      } else if (c.adult) {
+        skipped.push({ handle: h, reason: '18+ profiles are not downgraded' });
+        continue;
+      } else {
+        db.prepare('UPDATE creators SET audience = ? WHERE id = ?').run(audience, c.id);
+      }
+      updated.push(c.handle);
+    }
+  })();
+  // The search index holds text only, so a new audience needs no reindex.
+  res.json({ audience, updated, skipped });
 });
 
 creators.post('/creators', requirePerm('profiles'), (req, res) => {
@@ -137,8 +196,13 @@ creators.patch('/creators/:handle', (req, res) => {
     if (typeof b.ig_autopoll === 'boolean') set('ig_autopoll', b.ig_autopoll ? 1 : 0);
     if (typeof b.tiktok_autopoll === 'boolean') set('tiktok_autopoll', b.tiktok_autopoll ? 1 : 0);
     if (typeof b.adult === 'boolean') set('adult', b.adult ? 1 : 0);
-  } else if (['ig_handle', 'tiktok_handle', 'ig_autopoll', 'tiktok_autopoll', 'adult'].some((k) => b[k] !== undefined)) {
-    throw new HttpError(403, 'Changing sync sources or the 18+ flag needs the profiles permission');
+    if (b.audience !== undefined) {
+      const a = parseClassify(b.audience);
+      if (!a || a === 'adult') throw new HttpError(400, 'audience must be general or unknown; use adult for 18+');
+      set('audience', a);
+    }
+  } else if (['ig_handle', 'tiktok_handle', 'ig_autopoll', 'tiktok_autopoll', 'adult', 'audience'].some((k) => b[k] !== undefined)) {
+    throw new HttpError(403, 'Changing sync sources, the audience or the 18+ flag needs the profiles permission');
   }
   db.transaction(() => {
     if (sets.length) db.prepare(`UPDATE creators SET ${sets.join(', ')} WHERE id = ?`).run(...args, c.id);
@@ -244,9 +308,10 @@ creators.post(
         `UPDATE creators SET
            ig_handle = COALESCE(ig_handle, ?), tiktok_handle = COALESCE(tiktok_handle, ?),
            avatar_path = COALESCE(avatar_path, ?), banner_path = COALESCE(banner_path, ?),
-           bio = CASE WHEN bio = '' THEN ? ELSE bio END, adult = MAX(adult, ?)
+           bio = CASE WHEN bio = '' THEN ? ELSE bio END, adult = MAX(adult, ?),
+           audience = CASE WHEN audience = 'general' OR ? = 'general' THEN 'general' ELSE audience END
          WHERE id = ?`,
-      ).run(from.ig_handle, from.tiktok_handle, from.avatar_path, from.banner_path, from.bio, from.adult, into.id);
+      ).run(from.ig_handle, from.tiktok_handle, from.avatar_path, from.banner_path, from.bio, from.adult, from.audience, into.id);
       // The emptied profile keeps its row (soft-deleted), but its handle is freed to live on as an alias.
       db.prepare("UPDATE creators SET deleted = 1, ig_autopoll = 0, tiktok_autopoll = 0, handle = handle || '~merged' || id WHERE id = ?").run(from.id);
     })();
