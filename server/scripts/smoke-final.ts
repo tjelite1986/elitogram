@@ -144,7 +144,8 @@ async function main(): Promise<void> {
     check('a general-scope read with its id leaves it unread', (await admin.call('POST', '/api/notifications/read', 'general', { ids: [target] })).status === 200
       && !!(await admin.get('/api/notifications')).json?.items?.find((n: any) => n.id === target && !n.read_at));
     const otherUnread = ((await admin.get('/api/notifications')).json?.items ?? []).filter((n: any) => !n.read_at && n.id !== target).length;
-    check('a read with ids answers', (await admin.call('POST', '/api/notifications/read', 'unknown', { ids: [target] })).status === 200);
+    // Unscoped: that notification (a held post under general G) is in neither scope.
+    check('a read with ids answers', (await admin.call('POST', '/api/notifications/read', null, { ids: [target] })).status === 200);
     const after = (await admin.get('/api/notifications')).json?.items ?? [];
     check('a read with ids marks that one', !!after.find((n: any) => n.id === target && n.read_at));
     check('a read with ids leaves the others unread', after.filter((n: any) => !n.read_at && n.id !== target).length === otherUnread, `${otherUnread}`);
