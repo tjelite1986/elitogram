@@ -337,7 +337,17 @@ export async function runImport(ctx: JobContext): Promise<string> {
       // Asked again at insert time: the post may have become general while the files
       // were hashed and probed, and only an 18+ or all-general delivery may join it then.
       const allGeneral = audiences.every((a) => a === 'general');
-      const r = await addMediaToPost(existing.id, g.files.map(({ f }) => ({ abs: f.abs, name: path.basename(f.rel) })), true, () => adult || allGeneral || currentPostAudience(existing.id) !== 'general');
+      // An 18+ delivery sets the flag again in the same transaction as each insert:
+      // the earlier update above may have been lifted while the files were probed,
+      // and the new item must never inherit the post's general or unknown audience.
+      const markAdult = db.prepare('UPDATE posts SET adult = 1 WHERE id = ? AND adult = 0');
+      const r = await addMediaToPost(existing.id, g.files.map(({ f }) => ({ abs: f.abs, name: path.basename(f.rel) })), true, () => {
+        if (adult) {
+          markAdult.run(existing.id);
+          return true;
+        }
+        return allGeneral || currentPostAudience(existing.id) !== 'general';
+      });
       if (r.added) {
         media += r.added;
         indexPost(existing.id);

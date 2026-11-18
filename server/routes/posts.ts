@@ -247,6 +247,27 @@ function assertMayAssignCreator(req: Request, creatorId: number | null, currentC
   if (aud === 'general') throw new HttpError(403, 'Only a moderator can post under a creator classified general; mark the post 18+ or ask a moderator');
 }
 
+/** May this user classify (admin or the profiles permission)? */
+const isClassifier = (req: Request): boolean => req.user!.role === 'admin' || can(req.user!, 'profiles');
+
+/**
+ * The audience a new upload is stored with. 18+ (`adult=1` or
+ * `audience=adult`) needs nothing. `audience=general` needs a classifier.
+ * Otherwise the post is unclassified; when its creator is classified general
+ * and the uploader may not classify, the post is held for review, so it does
+ * not inherit general. Asked again inside the insert transaction, because the
+ * creator may be classified while the files are handled.
+ */
+function uploadAudience(req: Request, creatorId: number | null, wanted: string, adult: boolean): 'general' | 'unknown' | 'review' {
+  if (wanted === 'general') {
+    if (!isClassifier(req)) throw new HttpError(403, 'Only a moderator can classify posts');
+    return 'general';
+  }
+  if (adult || !creatorId || isClassifier(req)) return 'unknown';
+  const aud = db.prepare('SELECT audience FROM creators WHERE id = ?').pluck().get(creatorId);
+  return aud === 'general' ? 'review' : 'unknown';
+}
+
 posts.post(
   '/posts',
   ah(async (req, res) => {
@@ -254,18 +275,25 @@ posts.post(
     try {
       if (up.files.length === 0) throw new HttpError(400, 'Add at least one image or video');
       const author = resolveAuthor(req, up.fields);
-      assertMayAssignCreator(req, author.creatorId ?? null, null, up.fields.adult === '1');
+      const wanted = str(up.fields.audience, 20);
+      if (wanted && !parseClassify(wanted)) throw new HttpError(400, 'audience must be general, unknown or adult');
+      const adult = up.fields.adult === '1' || wanted === 'adult';
+      const creatorId = author.creatorId ?? null;
+      // Checked once before the files are handled, to fail fast, and again at insert.
+      uploadAudience(req, creatorId, wanted, adult);
       const result = await createPost({
         author,
         uploaderId: req.user!.id,
         caption: str(up.fields.caption),
-        adult: up.fields.adult === '1',
+        adult,
         files: up.files.map((f) => ({ abs: f.abs, name: f.name })),
+        beforeInsert: () => uploadAudience(req, creatorId, wanted, adult),
       });
       if (!result.postId) throw new HttpError(400, `No usable media: ${result.rejected.map((r) => `${r.name} (${r.reason})`).join(', ')}`);
       notifyMentions(str(up.fields.caption), req.user!, result.postId, 'post');
       if (author.creatorId) notifyFollowers(author.creatorId, result.postId, req.user!.id);
-      res.status(201).json({ id: result.postId, rejected: result.rejected });
+      const stored = db.prepare('SELECT audience FROM posts WHERE id = ?').pluck().get(result.postId);
+      res.status(201).json({ id: result.postId, rejected: result.rejected, audience: adult ? 'adult' : stored === 'review' ? 'review' : currentPostAudience(result.postId) });
     } finally {
       await up.cleanup();
     }
@@ -331,6 +359,15 @@ posts.patch(
           .get(id) as { c_adult: number } | undefined;
         db.prepare('UPDATE posts SET creator_id = ?, user_id = ? WHERE id = ?').run(author!.creatorId ?? null, author!.creatorId ? null : author!.userId, id);
         if (src?.c_adult && (!classifier || !row.c_adult)) db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
+        // The destination may have been classified general while the files moved.
+        // A post that is not 18+ and was not itself classified then waits in
+        // review instead of inheriting general from someone else's decision.
+        if (!classifier && author!.creatorId) {
+          const now2 = db
+            .prepare('SELECT p.adult, p.audience, c.audience AS c_audience FROM posts p JOIN creators c ON c.id = p.creator_id WHERE p.id = ?')
+            .get(id) as { adult: number; audience: string; c_audience: string } | undefined;
+          if (now2 && !now2.adult && now2.audience === 'unknown' && now2.c_audience === 'general') db.prepare("UPDATE posts SET audience = 'review' WHERE id = ?").run(id);
+        }
       })();
     }
     if (toRemove.length) {

@@ -15,6 +15,11 @@ import type { NextFunction, Request, Response } from 'express';
  * The effective audience of a post: 18+ when the post or its creator carries
  * the adult flag; general when the post or its creator was classified general;
  * otherwise unknown. Unknown is never treated as general.
+ *
+ * A post may also be held for review (`posts.audience = 'review'`): an upload
+ * nobody has classified, placed under a creator classified general by someone
+ * who may not classify. It stays unknown (Review lane only) whatever its
+ * creator says, until a moderator classifies the post itself.
  */
 export type Scope = 'general' | 'unknown';
 export const AUDIENCE_VALUES = ['general', 'unknown'] as const;
@@ -30,8 +35,8 @@ export const isScoped = (req: Request): boolean => scopeOf(req) !== null;
 
 /** SQL condition on posts `p` LEFT JOINed with creators `c`. */
 export function scopeSql(scope: Scope | null): string {
-  if (scope === 'general') return "(p.audience = 'general' OR COALESCE(c.audience, 'unknown') = 'general')";
-  if (scope === 'unknown') return "(p.audience <> 'general' AND COALESCE(c.audience, 'unknown') <> 'general')";
+  if (scope === 'general') return "(p.audience = 'general' OR (p.audience <> 'review' AND COALESCE(c.audience, 'unknown') = 'general'))";
+  if (scope === 'unknown') return "(p.audience <> 'general' AND (p.audience = 'review' OR COALESCE(c.audience, 'unknown') <> 'general'))";
   return '1=1';
 }
 
@@ -59,6 +64,7 @@ export function parseClassify(v: unknown): ClassifyValue | null {
 
 export function effectiveAudience(row: { adult?: unknown; audience?: unknown; c_adult?: unknown; c_audience?: unknown }): 'adult' | 'general' | 'unknown' {
   if (row.adult || row.c_adult) return 'adult';
+  if (row.audience === 'review') return 'unknown';
   if (row.audience === 'general' || row.c_audience === 'general') return 'general';
   return 'unknown';
 }

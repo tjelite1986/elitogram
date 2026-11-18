@@ -1,7 +1,7 @@
 import { Router, type Request } from 'express';
 import { db, now } from '../db/index.js';
 import { adultUnlocked } from '../auth.js';
-import { scopeOf } from '../audience.js';
+import { effectiveAudience, scopeOf } from '../audience.js';
 import { HttpError, intParam, str } from '../http.js';
 import { POST_FROM, visible, parseCursor, cursorSql, nextCursor, gridTiles } from '../views.js';
 
@@ -55,7 +55,7 @@ social.get('/photos', (req, res) => {
       size: r.size,
       created_at: r.created_at,
       author_handle: r.c_handle ?? r.u_username ?? null,
-      audience: r.adult || r.c_adult ? 'adult' : r.audience === 'general' || r.c_audience === 'general' ? 'general' : 'unknown',
+      audience: r.adult || r.c_adult ? 'adult' : effectiveAudience(r) === 'general' ? 'general' : 'unknown',
     })),
     next: rows.length === PHOTOS ? `${last.created_at}_${last.media_id}` : null,
   });

@@ -116,10 +116,18 @@ export interface CreatePostInput {
   sourceUrl?: string | null;
   sourceKey?: string | null;
   adult?: boolean;
-  audience?: 'general' | 'unknown';
+  audience?: 'general' | 'unknown' | 'review';
   meta?: Record<string, unknown> | null;
   files: IncomingFile[];
   skipKnown?: boolean; // skip files whose bytes are already in the library
+  /**
+   * Asked inside the insert transaction, after the files were moved and probed.
+   * Throws to refuse; the files then go back where they came from. Used for
+   * checks that may change while the files are being handled (the destination
+   * creator's classification). May return the audience to store instead of
+   * `audience`.
+   */
+  beforeInsert?: () => 'general' | 'unknown' | 'review' | void;
 }
 
 export interface CreatePostResult {
@@ -156,6 +164,7 @@ export async function createPost(input: CreatePostInput): Promise<CreatePostResu
     const hashes = await Promise.all(placed.map((x) => (x.p.sniff.kind === 'image' ? dHash(x.abs).catch(() => null) : null)));
     const t = now();
     const postId = db.transaction(() => {
+      const audience = input.beforeInsert?.() || input.audience;
       const caption = (input.caption ?? '').slice(0, 5000);
       const res = db
         .prepare(
@@ -173,7 +182,7 @@ export async function createPost(input: CreatePostInput): Promise<CreatePostResu
           input.sourceUrl ?? null,
           input.sourceKey ?? null,
           input.adult ? 1 : 0,
-          input.audience === 'general' ? 'general' : 'unknown',
+          audience === 'general' || audience === 'review' ? audience : 'unknown',
           input.meta ? JSON.stringify(input.meta) : null,
         );
       const id = Number(res.lastInsertRowid);

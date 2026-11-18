@@ -88,8 +88,12 @@ stories.get('/stories/:id/viewers', (req, res) => {
 
 stories.delete('/stories/:id', (req, res) => {
   const id = intParam(req.params.id);
-  const s = db.prepare('SELECT user_id FROM stories WHERE id = ?').get(id) as any;
+  const s = db.prepare('SELECT user_id, adult, audience FROM stories WHERE id = ?').get(id) as any;
   if (!s || (s.user_id !== req.user!.id && req.user!.role !== 'admin')) throw new HttpError(404, 'Story not found');
+  // A scoped request may only expire a story it could see itself; otherwise the
+  // answer would reveal (and the update expire) a hidden 18+ story.
+  const scope = scopeOf(req);
+  if (scope && (s.adult || (scope === 'general') !== (s.audience === 'general'))) throw new HttpError(404, 'Story not found');
   // Expire rather than delete; the expiry job removes the file later.
   db.prepare('UPDATE stories SET expired = 1 WHERE id = ?').run(id);
   res.json({ ok: true });

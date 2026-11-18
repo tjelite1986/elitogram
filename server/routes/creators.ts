@@ -107,6 +107,70 @@ creators.get('/creators', (req, res) => {
  * 'adult' sets the 18+ flag. An 18+ creator is never downgraded here; it is
  * reported as skipped (as "not found" to a scoped caller, which may not know it exists).
  */
+/**
+ * Other names a creator is known by: aliases, the Instagram and TikTok sync
+ * handles, and accounts named by its profile links on known sites. Grabbit's
+ * gateway uses them to match a creator against its own 18+ profiles under any
+ * identity, not only the Elitogram handle. Lower-case, without '@'.
+ */
+const LINK_SITES: [RegExp, RegExp][] = [
+  [/^(www\.)?instagram\.com$/, /^\/([a-z0-9._]{1,30})\/?$/],
+  [/^(www\.|m\.)?tiktok\.com$/, /^\/@([a-z0-9._]{1,30})\/?$/],
+  [/^(www\.|mobile\.)?(x|twitter)\.com$/, /^\/([a-z0-9_]{1,15})\/?$/],
+  [/^(www\.)?onlyfans\.com$/, /^\/([a-z0-9._-]{1,50})\/?$/],
+  [/^(www\.)?fansly\.com$/, /^\/([a-z0-9._-]{1,50})(\/posts)?\/?$/],
+  [/^(www\.|old\.)?reddit\.com$/, /^\/(?:u|user)\/([a-z0-9_-]{1,30})\/?$/],
+  [/^(www\.|m\.)?youtube\.com$/, /^\/@([a-z0-9._-]{1,100})\/?$/],
+];
+function linkHandles(raw: string | null): string[] {
+  let list: unknown[] = [];
+  try {
+    list = JSON.parse(raw || '[]');
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const l of Array.isArray(list) ? list : []) {
+    let u: URL;
+    try {
+      u = new URL(String((l as any)?.url ?? ''));
+    } catch {
+      continue;
+    }
+    const host = u.hostname.toLowerCase();
+    for (const [h, p] of LINK_SITES) {
+      const m = h.test(host) ? p.exec(u.pathname.toLowerCase()) : null;
+      if (m) out.push(m[1]);
+    }
+  }
+  return out;
+}
+
+creators.get('/creator-identities', (req, res) => {
+  const handles = ([] as unknown[])
+    .concat(req.query.h ?? [])
+    .map((x) => String(x).trim().toLowerCase())
+    .filter((x) => /^[a-z0-9._~-]{1,100}$/.test(x))
+    .slice(0, 100);
+  const scope = scopeOf(req);
+  // Only creators the caller could see: an identity list is still a fact about a profile.
+  const scopeCond = scope ? `AND c.adult = 0 AND ${creatorScopeSql(scope)}` : adultUnlocked(req) ? '' : 'AND c.adult = 0';
+  const one = db.prepare(`SELECT c.id, c.handle, c.ig_handle, c.tiktok_handle, c.links FROM creators c WHERE c.handle = ? AND c.deleted = 0 ${scopeCond}`);
+  const aliases = db.prepare('SELECT alias FROM creator_aliases WHERE creator_id = ?').pluck();
+  const items: Record<string, string[]> = {};
+  for (const h of [...new Set(handles)]) {
+    const c = one.get(h) as any;
+    if (!c) continue;
+    const names = new Set<string>();
+    for (const n of [...(aliases.all(c.id) as string[]), c.ig_handle, c.tiktok_handle, ...linkHandles(c.links)]) {
+      const v = String(n ?? '').trim().replace(/^@/, '').toLowerCase();
+      if (v && v !== c.handle) names.add(v.slice(0, 100));
+    }
+    items[c.handle] = [...names];
+  }
+  res.set('Cache-Control', 'private, no-store').json({ items });
+});
+
 creators.post('/creators-classify', requirePerm('profiles'), (req, res) => {
   const audience = parseClassify(req.body?.audience);
   if (!audience) throw new HttpError(400, 'audience must be general, unknown or adult');
@@ -302,6 +366,9 @@ creators.delete('/creators/:handle/follow', (req, res) => {
 /** Merges "from" into "into": posts, files, aliases, follows and sync handles move over. */
 creators.post(
   '/creators-merge',
+  // A merge moves every post of the source, including ones a scoped caller
+  // cannot see, and its answer counts them; it is a moderation action.
+  refuseScoped,
   requirePerm('profiles'),
   ah(async (req, res) => {
     const from = loadCreator(req, str(req.body?.from, 80));
@@ -310,6 +377,11 @@ creators.post(
     const postIds = db.prepare('SELECT id FROM posts WHERE creator_id = ?').pluck().all(from.id) as number[];
     await moveMediaToAuthor(postIds, { creatorId: into.id });
     db.transaction(() => {
+      // The source is read again here: it may have been classified (18+ or
+      // general) while the files were moving, and the merged profile must carry
+      // its current classification, not the snapshot taken before the move.
+      const cur = db.prepare('SELECT * FROM creators WHERE id = ?').get(from.id) as any;
+      if (cur) Object.assign(from, cur);
       db.prepare('UPDATE posts SET creator_id = ? WHERE creator_id = ?').run(into.id, from.id);
       db.prepare('UPDATE creator_aliases SET creator_id = ? WHERE creator_id = ?').run(into.id, from.id);
       db.prepare('INSERT OR IGNORE INTO creator_aliases (alias, creator_id) VALUES (?, ?)').run(from.handle, into.id);

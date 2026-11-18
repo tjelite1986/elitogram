@@ -75,18 +75,26 @@ media.get('/:id(\\d+)', (req, res) => {
 media.get(
   '/:id(\\d+)/t',
   ah(async (req, res) => {
-    const m = loadMedia(req, intParam(req.params.id));
+    const id = intParam(req.params.id);
+    const m = loadMedia(req, id);
     if (!m) return notFound(res);
-    describe(res, m);
+    let out: string | null = null;
     try {
       const w = [320, 480, 1080].includes(Number(req.query.w)) ? Number(req.query.w) : 480;
-      const out = await thumbnail(m.path, m.kind, `m${mediaIdentity(m)}`, w);
-      sendFile(req, res, out, 'image/webp', 'private, max-age=604800');
+      out = await thumbnail(m.path, m.kind, `m${mediaIdentity(m)}`, w);
     } catch {
-      // No thumbnail possible: images fall back to the original, videos to a neutral tile.
-      if (m.kind === 'image') sendFile(req, res, mediaAbs(m.path), m.mime);
-      else fallbackBanner(res);
+      out = null;
     }
+    // Generating a thumbnail can take a while; the post or its creator may have
+    // been reclassified (or the row reused) meanwhile. Decide again on fresh
+    // rows, and only then describe and send.
+    const now2 = loadMedia(req, id);
+    if (!now2 || mediaIdentity(now2) !== mediaIdentity(m)) return notFound(res);
+    describe(res, now2);
+    if (out) sendFile(req, res, out, 'image/webp', 'private, max-age=604800');
+    // No thumbnail possible: images fall back to the original, videos to a neutral tile.
+    else if (now2.kind === 'image') sendFile(req, res, mediaAbs(now2.path), now2.mime);
+    else fallbackBanner(res);
   }),
 );
 
