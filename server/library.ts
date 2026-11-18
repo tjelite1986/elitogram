@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import { db, now } from './db/index.js';
 import { creatorDir, mediaAbs, mediaRel, moveFile, sha256File, sniffFile, uniqueTarget, validateHandle, userDir, type Sniffed } from './media/files.js';
 import { dHash, probe } from './media/probe.js';
+import { effectiveAudience } from './audience.js';
 
 export interface IncomingFile {
   abs: string; // current location (temp dir, import folder, download dir)
@@ -195,8 +196,21 @@ export async function createPost(input: CreatePostInput): Promise<CreatePostResu
   }
 }
 
-/** Adds media to an existing post (edit page). */
-export async function addMediaToPost(postId: number, files: IncomingFile[], skipKnown = false): Promise<CreatePostResult> {
+/** The post's effective audience as stored right now. */
+export function currentPostAudience(postId: number): 'adult' | 'general' | 'unknown' {
+  const row = db
+    .prepare('SELECT p.adult, p.audience, c.adult AS c_adult, c.audience AS c_audience FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.id = ?')
+    .get(postId) as any;
+  return row ? effectiveAudience(row) : 'unknown';
+}
+
+/**
+ * Adds media to an existing post (edit page, late importer deliveries).
+ * `mayJoin` is asked again right before each row is inserted, in the same
+ * synchronous step, because the post may have been reclassified while files
+ * were being probed; a refused file goes back to where it came from.
+ */
+export async function addMediaToPost(postId: number, files: IncomingFile[], skipKnown = false, mayJoin?: () => boolean): Promise<CreatePostResult> {
   const post = db.prepare('SELECT creator_id, user_id FROM posts WHERE id = ?').get(postId) as { creator_id: number | null; user_id: number | null } | undefined;
   if (!post) throw new Error('Post not found');
   const { ok, rejected } = await prepare(files, skipKnown);
@@ -215,10 +229,19 @@ export async function addMediaToPost(postId: number, files: IncomingFile[], skip
       continue;
     }
     const ph = p.sniff.kind === 'image' ? await dHash(dest).catch(() => null) : null;
-    db.prepare(
-      `INSERT INTO media (post_id, position, kind, mime, path, size, width, height, duration, sha256, phash, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(postId, pos++, p.sniff.kind, p.sniff.mime, mediaRel(dest), fs.statSync(dest).size, meta.width, meta.height, meta.duration, p.sha, ph, now());
+    const inserted = db.transaction(() => {
+      if (mayJoin && !mayJoin()) return false;
+      db.prepare(
+        `INSERT INTO media (post_id, position, kind, mime, path, size, width, height, duration, sha256, phash, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(postId, pos++, p.sniff.kind, p.sniff.mime, mediaRel(dest), fs.statSync(dest).size, meta.width, meta.height, meta.duration, p.sha, ph, now());
+      return true;
+    })();
+    if (!inserted) {
+      await moveFile(dest, p.file.abs).catch(() => undefined);
+      rejected.push({ name: p.file.name, reason: 'the post was classified general meanwhile' });
+      continue;
+    }
     added++;
   }
   return { postId, added, rejected };

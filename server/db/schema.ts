@@ -262,11 +262,30 @@ export const migrations: string[] = [
   `,
   // Grabbit 3.0 phase 2 (additive): where a creator's avatar and banner came from.
   // 'profile' = the creator's own platform profile picture; 'chosen' = uploaded by
-  // a moderator; 'post:<media id>' = a
-  // crop of that media item; NULL = unknown (older crops). A scoped request is only
+  // a moderator; 'post:<media identity>' (id plus a hash of the bytes, see
+  // mediaIdentity) = a crop of that media item; NULL = unknown (older crops). A scoped request is only
   // given a picture whose source is known and still in scope.
   `
   ALTER TABLE creators ADD COLUMN avatar_source TEXT;
   ALTER TABLE creators ADD COLUMN banner_source TEXT;
+  `,
+  // Grabbit 3.0 phase 2 (additive): a revision of everything that decides what a
+  // scope can see. Triggers bump it in the same transaction as the change, from
+  // any code path (routes, importer, jobs, an older image after a rollback), so
+  // the categories cache can key on it instead of an aggregate that can collide.
+  `
+  CREATE TABLE visibility_rev (id INTEGER PRIMARY KEY CHECK (id = 1), rev INTEGER NOT NULL);
+  INSERT INTO visibility_rev (id, rev) VALUES (1, 0);
+  CREATE TRIGGER vis_posts_ins AFTER INSERT ON posts BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
+  CREATE TRIGGER vis_posts_del AFTER DELETE ON posts BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
+  CREATE TRIGGER vis_posts_upd AFTER UPDATE OF adult, audience, deleted, creator_id ON posts BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
+  CREATE TRIGGER vis_creators_ins AFTER INSERT ON creators BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
+  CREATE TRIGGER vis_creators_del AFTER DELETE ON creators BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
+  CREATE TRIGGER vis_creators_upd AFTER UPDATE OF adult, audience, deleted ON creators BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
+  CREATE TRIGGER vis_media_ins AFTER INSERT ON media BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
+  CREATE TRIGGER vis_media_del AFTER DELETE ON media BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
+  CREATE TRIGGER vis_media_upd AFTER UPDATE OF missing, post_id, kind, width, height, position ON media BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
+  CREATE TRIGGER vis_tags_ins AFTER INSERT ON post_hashtags BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
+  CREATE TRIGGER vis_tags_del AFTER DELETE ON post_hashtags BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
   `,
 ];

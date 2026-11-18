@@ -5,7 +5,7 @@ import { ah, HttpError, intParam, str } from '../http.js';
 import { creatorScopeSql, effectiveAudience, isScoped, parseClassify, scopeOf, scopeSql } from '../audience.js';
 import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles } from '../views.js';
 import { parseUpload } from '../media/upload.js';
-import { addMediaToPost, createPost, findCreatorByName, indexPost, moveMediaToAuthor, parseMentions, setPostHashtags, type Author } from '../library.js';
+import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, parseMentions, setPostHashtags, type Author } from '../library.js';
 import { notify, notifyFollowers } from '../notify.js';
 
 export const posts = Router();
@@ -321,9 +321,17 @@ posts.patch(
     else if (audience) db.prepare('UPDATE posts SET audience = ? WHERE id = ?').run(audience, id);
     if (author) {
       await moveMediaToAuthor([id], author);
-      db.prepare('UPDATE posts SET creator_id = ?, user_id = ? WHERE id = ?').run(author.creatorId ?? null, author.creatorId ? null : author.userId, id);
-      // A post inherits 18+ from its creator; moving it keeps that restriction on the post itself.
-      if (row.c_adult && !classifier) db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
+      // A post inherits 18+ from its creator; moving it keeps that restriction on
+      // the post itself. The source creator is read again here, in the same
+      // transaction as the move, because it may have been marked 18+ while the
+      // files were moving. Only a moderator who saw the 18+ creator may lift it.
+      db.transaction(() => {
+        const src = db
+          .prepare('SELECT COALESCE(c.adult, 0) AS c_adult FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.id = ?')
+          .get(id) as { c_adult: number } | undefined;
+        db.prepare('UPDATE posts SET creator_id = ?, user_id = ? WHERE id = ?').run(author!.creatorId ?? null, author!.creatorId ? null : author!.userId, id);
+        if (src?.c_adult && (!classifier || !row.c_adult)) db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
+      })();
     }
     if (toRemove.length) {
       // Removed media move to a new hidden, deleted post so the file and its row stay recoverable.
@@ -373,12 +381,14 @@ posts.post(
     if (!canEditPost(req.user!, row)) throw new HttpError(403, 'Forbidden');
     // A new item inherits the post's audience. On a post shown as general that
     // would classify it, so only a moderator may add to such a post.
-    if (effectiveAudience(row) === 'general' && req.user!.role !== 'admin' && !can(req.user!, 'profiles')) {
+    const moderator = req.user!.role === 'admin' || can(req.user!, 'profiles');
+    if (effectiveAudience(row) === 'general' && !moderator) {
       throw new HttpError(403, 'Only a moderator can add media to a post classified general');
     }
     const up = await parseUpload(req);
     try {
-      const r = await addMediaToPost(id, up.files.map((f) => ({ abs: f.abs, name: f.name })));
+      // Asked again at insert time: the post may become general while the upload streams.
+      const r = await addMediaToPost(id, up.files.map((f) => ({ abs: f.abs, name: f.name })), false, () => moderator || currentPostAudience(id) !== 'general');
       res.json(r);
     } finally {
       await up.cleanup();

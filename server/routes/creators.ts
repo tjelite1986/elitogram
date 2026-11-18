@@ -263,7 +263,7 @@ for (const kind of ['avatar', 'banner'] as const) {
   );
 }
 
-creators.delete('/creators/:handle', requirePerm('profiles'), (req, res) => {
+creators.delete('/creators/:handle', refuseScoped, requirePerm('profiles'), (req, res) => {
   const handle = req.params.handle.toLowerCase();
   if (isReservedName(handle) || validateHandle(handle)) throw new HttpError(400, `"${handle}" is a reserved name and cannot be deleted`);
   const c = loadCreator(req, handle);
@@ -276,7 +276,7 @@ creators.delete('/creators/:handle', requirePerm('profiles'), (req, res) => {
   res.json({ ok: true });
 });
 
-creators.post('/creators/:handle/restore', requirePerm('profiles'), (req, res) => {
+creators.post('/creators/:handle/restore', refuseScoped, requirePerm('profiles'), (req, res) => {
   const c = db.prepare('SELECT id, deleted FROM creators WHERE handle = ?').get(req.params.handle.toLowerCase()) as any;
   if (!c) throw new HttpError(404, 'Profile not found');
   db.transaction(() => {

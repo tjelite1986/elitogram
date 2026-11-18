@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import { db } from '../db/index.js';
-import { addMediaToPost, createCreator, createPost, findCreatorByName, indexPost, type IncomingFile } from '../library.js';
+import { addMediaToPost, createCreator, createPost, currentPostAudience, findCreatorByName, indexPost, type IncomingFile } from '../library.js';
 import { APP_DIRS, mediaAbs, validateHandle, moveFile, sha256File } from '../media/files.js';
 import { effectiveAudience } from '../audience.js';
 import { notifyFollowers } from '../notify.js';
@@ -334,7 +334,10 @@ export async function runImport(ctx: JobContext): Promise<string> {
       // Never loosened here; general/unknown on a later file changes nothing
       // (an 18+ delivery already marked the post above).
       // Items the post does not hold yet (by content) join it; the rest are done.
-      const r = await addMediaToPost(existing.id, g.files.map(({ f }) => ({ abs: f.abs, name: path.basename(f.rel) })), true);
+      // Asked again at insert time: the post may have become general while the files
+      // were hashed and probed, and only an 18+ or all-general delivery may join it then.
+      const allGeneral = audiences.every((a) => a === 'general');
+      const r = await addMediaToPost(existing.id, g.files.map(({ f }) => ({ abs: f.abs, name: path.basename(f.rel) })), true, () => adult || allGeneral || currentPostAudience(existing.id) !== 'general');
       if (r.added) {
         media += r.added;
         indexPost(existing.id);

@@ -67,25 +67,12 @@ const categoryCache = new Map<string, { at: number; fp: string; body: unknown }>
 const CATEGORY_TTL = 60_000;
 
 /**
- * A cheap fingerprint of everything that decides what a scope can see (about
- * 15 ms on 45k posts). A cached answer is reused only while it is unchanged,
- * so a post or creator marked 18+ leaves the categories at once. The sums are
- * weighted by id so two opposite changes do not cancel out. A post's creator is
- * part of it, since a post inherits 18+ and general from whoever it belongs to;
- * that term hashes each (creator, post) pair, because a linear weight lets two
- * reassignments cancel out (posts 10 and 20 moving from creators 1 and 4 to 3).
+ * The visibility revision (migration 5): triggers bump it in the same
+ * transaction as any change to posts, creators, media or hashtags that decides
+ * what a scope can see, so a cached answer is reused only while nothing changed.
  */
 function visibilityFingerprint(): string {
-  return db
-    .prepare(
-      `SELECT
-         (SELECT COUNT(*) || ':' || TOTAL(adult * id) || ':' || TOTAL((audience = 'general') * id) || ':' || TOTAL(deleted * id) || ':' || SUM((IFNULL(creator_id, 0) * 2654435761 + id * 40503) % 1048573) || ':' || IFNULL(MAX(id), 0) FROM posts) || '|' ||
-         (SELECT COUNT(*) || ':' || TOTAL(adult * id) || ':' || TOTAL((audience = 'general') * id) || ':' || TOTAL(deleted * id) FROM creators) || '|' ||
-         (SELECT COUNT(*) || ':' || TOTAL(missing * id) || ':' || TOTAL(post_id * id) FROM media) || '|' ||
-         (SELECT COUNT(*) || ':' || TOTAL(post_id * hashtag_id) FROM post_hashtags)`,
-    )
-    .pluck()
-    .get() as string;
+  return String(db.prepare('SELECT rev FROM visibility_rev WHERE id = 1').pluck().get());
 }
 
 social.get('/categories', (req, res) => {
