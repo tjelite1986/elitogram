@@ -55,6 +55,7 @@ social.get('/photos', (req, res) => {
       size: r.size,
       created_at: r.created_at,
       author_handle: r.c_handle ?? r.u_username ?? null,
+      author_type: r.c_handle ? 'creator' : 'user',
       audience: r.adult || r.c_adult ? 'adult' : effectiveAudience(r) === 'general' ? 'general' : 'unknown',
     })),
     next: rows.length === PHOTOS ? `${last.created_at}_${last.media_id}` : null,

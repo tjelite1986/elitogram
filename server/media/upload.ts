@@ -37,13 +37,22 @@ export function parseUpload(req: Request): Promise<ParsedUpload> {
     };
     // Settles once: a request torn down mid-body may still let the parser close.
     let settled = false;
+    let tearing = false;
+    let bb: busboy.Busboy;
+    // One teardown for every failure (a parser error, a failed write, an oversized
+    // file, the client going away): stop feeding the parser, close every file
+    // being written, wait for the writers, then remove what was staged.
     const fail = async (err: Error) => {
-      if (settled) return;
+      if (settled || tearing) return;
+      tearing = true;
+      req.unpipe(bb);
+      bb.removeAllListeners('file');
+      for (const out of outs) out.destroy();
+      await Promise.allSettled(writes);
       settled = true;
       await cleanup();
       reject(err);
     };
-    let bb: busboy.Busboy;
     try {
       bb = busboy({ headers: req.headers, limits: { fileSize: MAX_FILE_BYTES, files: 50, fields: 50, fieldSize: 64 * 1024 } });
     } catch (err) {
@@ -55,7 +64,7 @@ export function parseUpload(req: Request): Promise<ParsedUpload> {
       fields[name] = value;
     });
     bb.on('file', (field, stream, info) => {
-      if (settled) {
+      if (settled || tearing) {
         stream.resume();
         return;
       }
@@ -70,21 +79,23 @@ export function parseUpload(req: Request): Promise<ParsedUpload> {
       stream.on('limit', () => {
         failed = new Error(`File ${info.filename} is larger than the upload limit`);
       });
-      writes.push(
-        new Promise((res, rej) => {
-          out.on('finish', res);
-          out.on('close', res);
-          out.on('error', rej);
-          stream.on('error', rej);
-        }),
-      );
+      const written = new Promise<void>((res, rej) => {
+        out.on('finish', res);
+        out.on('close', res);
+        out.on('error', rej);
+        stream.on('error', rej);
+      });
+      // Handled here as well, so a writer that fails after the parser has
+      // already failed is never an unhandled rejection.
+      written.catch(() => undefined);
+      writes.push(written);
       stream.pipe(out);
     });
     bb.on('error', (err) => {
       void fail(err as Error);
     });
     bb.on('close', async () => {
-      if (settled) return;
+      if (settled || tearing) return;
       try {
         await Promise.all(writes);
       } catch (err) {
@@ -95,21 +106,14 @@ export function parseUpload(req: Request): Promise<ParsedUpload> {
         await fail(failed);
         return;
       }
-      if (settled) return;
+      if (settled || tearing) return;
       settled = true;
       resolve({ fields, files: files.filter((f) => f.size > 0), cleanup });
     });
     // The client went away (cancelled, or left the page) before the body ended.
     // The parser may never close then, so tear it down here: stop feeding it,
     // close every file being written and remove what was staged.
-    const abort = async () => {
-      if (settled) return;
-      req.unpipe(bb);
-      bb.removeAllListeners('file');
-      for (const out of outs) out.destroy();
-      await Promise.allSettled(writes);
-      await fail(new Error('Upload aborted'));
-    };
+    const abort = () => fail(new Error('Upload aborted'));
     req.on('aborted', () => void abort());
     req.on('close', () => {
       if (!req.complete) void abort();

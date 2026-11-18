@@ -147,38 +147,38 @@ function linkHandles(raw: string | null): string[] {
 }
 
 creators.get('/creator-identities', (req, res) => {
-  const handles = ([] as unknown[])
-    .concat(req.query.h ?? [])
-    .map((x) => String(x).trim().toLowerCase())
-    .filter((x) => /^[a-z0-9._~-]{1,100}$/.test(x))
-    .slice(0, 100);
+  // `h` names creators, `a` names accounts. The two namespaces are separate (a
+  // creator and an account may share a handle), so each is answered on its own
+  // and a caller never reads one as the other.
+  const list = (v: unknown) =>
+    ([] as unknown[])
+      .concat(v ?? [])
+      .map((x) => String(x).trim().toLowerCase())
+      .filter((x) => /^[a-z0-9._~-]{1,100}$/.test(x))
+      .slice(0, 100);
+  const handles = list(req.query.h);
+  const usernames = list(req.query.a);
   const scope = scopeOf(req);
   // Only creators the caller could see: an identity list is still a fact about a
   // profile. In a scope that is the creator's own profile, or any post by the
   // creator the scope can see (a post held in review under a creator classified
-  // general shows in the unknown scope while its creator does not). Deleted
-  // posts count too, since their media stay reachable for their editors.
+  // general shows in the unknown scope while its creator does not). A deleted
+  // post counts only for those who may see it (its uploader, its account
+  // author, or a moderator), as with its media.
+  const moderator = req.user!.role === 'admin' || can(req.user!, 'profiles');
+  const deletedOk = moderator ? '1=1' : '(p.uploader_id = @me OR p.user_id = @me)';
   const inScope = scope
-    ? `AND c.adult = 0 AND (${creatorScopeSql(scope)} OR EXISTS (SELECT 1 FROM posts p WHERE p.creator_id = c.id AND p.adult = 0 AND ${scopeSql(scope)}))`
+    ? `AND c.adult = 0 AND (${creatorScopeSql(scope)} OR EXISTS (SELECT 1 FROM posts p WHERE p.creator_id = c.id AND p.adult = 0 AND (p.deleted = 0 OR ${deletedOk}) AND ${scopeSql(scope)}))`
     : adultUnlocked(req)
       ? ''
       : 'AND c.adult = 0';
-  const one = db.prepare(`SELECT c.id, c.handle, c.ig_handle, c.tiktok_handle, c.links FROM creators c WHERE c.handle = ? AND c.deleted = 0 ${inScope}`);
-  const anyCreator = db.prepare('SELECT 1 FROM creators WHERE handle = ? AND deleted = 0');
+  const one = db.prepare(`SELECT c.id, c.handle, c.ig_handle, c.tiktok_handle, c.links FROM creators c WHERE c.handle = @h AND c.deleted = 0 ${inScope}`);
   const account = db.prepare('SELECT 1 FROM users WHERE username = ?');
   const aliases = db.prepare('SELECT alias FROM creator_aliases WHERE creator_id = ?').pluck();
   const items: Record<string, string[]> = {};
-  // Handles that name an account and no creator: an account has no other names.
-  // Listed explicitly, so a caller can tell an account from a creator that was
-  // not answered (outside the scope, or unknown) and refuse the latter. A handle
-  // held by a creator outside the scope is never listed as an account.
-  const accounts: string[] = [];
   for (const h of [...new Set(handles)]) {
-    const c = one.get(h) as any;
-    if (!c) {
-      if (!anyCreator.get(h) && account.get(h)) accounts.push(h);
-      continue;
-    }
+    const c = one.get({ h, me: req.user!.id }) as any;
+    if (!c) continue;
     const names = new Set<string>();
     for (const n of [...(aliases.all(c.id) as string[]), c.ig_handle, c.tiktok_handle, ...linkHandles(c.links)]) {
       const v = String(n ?? '').trim().replace(/^@/, '').toLowerCase();
@@ -186,6 +186,9 @@ creators.get('/creator-identities', (req, res) => {
     }
     items[c.handle] = [...names];
   }
+  // Accounts have no other names; listed when they exist, whatever creator
+  // shares the name.
+  const accounts = [...new Set(usernames)].filter((u) => account.get(u));
   res.set('Cache-Control', 'private, no-store').json({ items, accounts });
 });
 

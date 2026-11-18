@@ -341,12 +341,20 @@ export async function runImport(ctx: JobContext): Promise<string> {
       // the earlier update above may have been lifted while the files were probed,
       // and the new item must never inherit the post's general or unknown audience.
       const markAdult = db.prepare('UPDATE posts SET adult = 1 WHERE id = ? AND adult = 0');
+      // A classified delivery that is not general on every item holds an
+      // unclassified post for review, in the same transaction as the insert, so
+      // classifying its creator general later cannot expose the late item.
+      const classified = audiences.some((a) => a !== null);
+      const holdForReview = db.prepare("UPDATE posts SET audience = 'review' WHERE id = ? AND audience = 'unknown' AND adult = 0");
       const r = await addMediaToPost(existing.id, g.files.map(({ f }) => ({ abs: f.abs, name: path.basename(f.rel) })), true, () => {
         if (adult) {
           markAdult.run(existing.id);
           return true;
         }
-        return allGeneral || currentPostAudience(existing.id) !== 'general';
+        if (allGeneral) return true;
+        if (currentPostAudience(existing.id) === 'general') return false;
+        if (classified && holdForReview.run(existing.id).changes) ctx.log(`Held post ${existing.id} for review: a late item of ${sourceKey} is not classified general`);
+        return true;
       });
       if (r.added) {
         media += r.added;

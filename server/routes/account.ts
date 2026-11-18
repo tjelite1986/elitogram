@@ -173,7 +173,8 @@ account.get('/notifications', (req, res) => {
   const rows = db
     .prepare(
       `SELECT n.id, n.kind, n.text, n.post_id, n.creator_id, n.created_at, n.read_at, n.actor_id, c.handle AS creator_handle,
-         (SELECT COALESCE(pc.handle, pu.username) FROM posts pp LEFT JOIN creators pc ON pc.id = pp.creator_id LEFT JOIN users pu ON pu.id = pp.user_id WHERE pp.id = n.post_id) AS post_author_handle
+         (SELECT COALESCE(pc.handle, pu.username) FROM posts pp LEFT JOIN creators pc ON pc.id = pp.creator_id LEFT JOIN users pu ON pu.id = pp.user_id WHERE pp.id = n.post_id) AS post_author_handle,
+         (SELECT CASE WHEN pp.creator_id IS NOT NULL THEN 'creator' WHEN pp.user_id IS NOT NULL THEN 'user' END FROM posts pp WHERE pp.id = n.post_id) AS post_author_type
        FROM notifications n LEFT JOIN creators c ON c.id = n.creator_id WHERE n.user_id = ? AND ${notificationScopeSql(req)} ORDER BY n.created_at DESC LIMIT 100`,
     )
     .all(req.user!.id) as any[];
@@ -183,7 +184,17 @@ account.get('/notifications', (req, res) => {
 account.post('/notifications/read', (req, res) => {
   // A scoped request marks only what it could list: notifications outside the
   // scope stay unread for the views that can show them.
-  db.prepare(`UPDATE notifications AS n SET read_at = ? WHERE n.user_id = ? AND n.read_at IS NULL AND ${notificationScopeSql(req)}`).run(now(), req.user!.id);
+  // `ids` limits it to the notifications the caller showed (a proxy may have
+  // filtered some out of the list it was given); without it, every unread one.
+  const raw = req.body?.ids;
+  if (raw !== undefined && (!Array.isArray(raw) || raw.length > 500)) throw new HttpError(400, 'ids must be a list of at most 500 ids');
+  const ids = Array.isArray(raw) ? [...new Set(raw.map(Number).filter((x) => Number.isInteger(x) && x > 0))] : null;
+  if (ids && ids.length === 0) {
+    res.json({ ok: true });
+    return;
+  }
+  const only = ids ? `AND n.id IN (${ids.map(() => '?').join(',')})` : '';
+  db.prepare(`UPDATE notifications AS n SET read_at = ? WHERE n.user_id = ? AND n.read_at IS NULL AND ${notificationScopeSql(req)} ${only}`).run(now(), req.user!.id, ...(ids ?? []));
   res.json({ ok: true });
 });
 
