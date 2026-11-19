@@ -604,6 +604,10 @@ export function createCreator(handle: string, fields: { displayName?: string; ad
 // --- Mention and hashtag backfill (Grabbit 3.0.3) ------------------------------
 
 export const BACKFILL_CURSOR_KEY = 'metadata_backfill_after';
+/** Pass state of an apply run, JSON {"pass": n, "created": bool}; see metadataBackfillApplyBatch. */
+export const BACKFILL_PASS_KEY = 'metadata_backfill_pass';
+/** Passes one apply run may make: the first and up to two reconciliation passes. */
+export const BACKFILL_MAX_PASSES = 3;
 
 export interface BackfillStats {
   scanned: number;
@@ -626,33 +630,25 @@ export function emptyBackfillStats(): BackfillStats {
 /** A post whose mentions could not be stored; the backfill checkpoint stays before it. */
 export class BackfillStopped extends Error {}
 
+type BackfillSeen = { names: Set<string>; tags: Set<string>; reused: Set<number> };
+type BackfillRow = { id: number; caption: string; creator_id: number | null; source_url: string | null; meta: string | null };
+
+const selectBackfillRows = (from: number, limit: number) =>
+  db.prepare('SELECT id, caption, creator_id, source_url, meta FROM posts WHERE id > ? AND deleted = 0 ORDER BY id LIMIT ?').all(from, limit) as BackfillRow[];
+
 /**
- * One batch of the backfill: the next `limit` live posts after `afterId`, by id
- * (apply: after the stored checkpoint when that is further, read in the
- * write transaction, so concurrent runners never move it backward).
- * Dry run (apply = false) reads only and counts what applying would write;
- * `seen` carries names, tags and creators across batches so nothing is counted
- * twice. Apply reads the batch and writes it in one write transaction (BEGIN
- * IMMEDIATE, so no caption can change between the read and the write): mention
- * rows, creators for new @names, hashtag rows, and the checkpoint
- * (BACKFILL_CURSOR_KEY) after the last post done. Captions, posts and files are
- * never changed. A post whose mentions cannot be stored writes nothing: the
- * posts before it commit with the checkpoint just before it, and
- * BackfillStopped is thrown, so a rerun retries that post rather than skipping it.
- * Returns the number of posts read (0 = done).
+ * The per-post step of the backfill. Dry run (apply = false) reads only and
+ * counts what applying would write; `seen` carries names, tags and creators
+ * across batches so nothing is counted twice. Apply rewrites the post's
+ * hashtag rows when they differ from its caption and rebuilds its mention rows
+ * (setPostMentions), which also removes a link the caption no longer resolves
+ * to (one that became 'ambiguous', say). Throws when a mention cannot be stored.
  */
-export function metadataBackfillBatch(
-  afterId: number,
-  limit: number,
-  apply: boolean,
-  stats: BackfillStats,
-  seen: { names: Set<string>; tags: Set<string>; reused: Set<number> },
-): number {
+function backfillPostStep(apply: boolean, stats: BackfillStats, seen: BackfillSeen): (p: BackfillRow) => void {
   const tagKnown = db.prepare('SELECT 1 FROM hashtags WHERE tag = ?');
   const tagLinked = db.prepare('SELECT 1 FROM post_hashtags ph JOIN hashtags h ON h.id = ph.hashtag_id WHERE ph.post_id = ? AND h.tag = ?');
   const haveRows = db.prepare('SELECT creator_id FROM post_mentions WHERE post_id = ?').pluck();
-  type Row = { id: number; caption: string; creator_id: number | null; source_url: string | null; meta: string | null };
-  const one = (p: Row) => {
+  return (p: BackfillRow) => {
     stats.scanned++;
     stats.lastId = p.id;
     const caption = p.caption ?? '';
@@ -724,27 +720,83 @@ export function metadataBackfillBatch(
       for (const id of have) if (!want.has(`c:${id}`)) stats.removedRelations++;
     }
   };
-  const select = (from: number) =>
-    db.prepare('SELECT id, caption, creator_id, source_url, meta FROM posts WHERE id > ? AND deleted = 0 ORDER BY id LIMIT ?').all(from, limit) as Row[];
-  if (!apply) {
-    const rows = select(afterId);
-    rows.forEach(one);
-    return rows.length;
-  }
+}
+
+/**
+ * One dry-run batch: the next `limit` live posts after `afterId`, by id, read
+ * only. A dry run is a single pass in id order. It cannot forecast what the
+ * reconciliation passes of an apply run change: a link an earlier post gets
+ * before a later post creates a competing claimant is counted as added, not as
+ * the 'ambiguous' skip the next pass turns it into. Returns the posts read (0 = done).
+ */
+export function metadataBackfillDryBatch(afterId: number, limit: number, stats: BackfillStats, seen: BackfillSeen): number {
+  const rows = selectBackfillRows(afterId, limit);
+  rows.forEach(backfillPostStep(false, stats, seen));
+  return rows.length;
+}
+
+export interface BackfillApplyStep {
+  read: number; // posts read by this batch
+  pass: number; // the pass the batch belonged to
+  next: 'more' | 'pass' | 'done'; // more posts in this pass / a new pass starts at id 0 / finished
+  capped: boolean; // finished at BACKFILL_MAX_PASSES with creators still being made
+}
+
+/**
+ * One apply batch. The stored state is the only cursor: the checkpoint
+ * (BACKFILL_CURSOR_KEY, last post done) and the pass (BACKFILL_PASS_KEY: its
+ * number, and whether it made a creator yet). Both are read and written in one
+ * write transaction (BEGIN IMMEDIATE) with the batch itself, so no caption
+ * changes between the read and the write, concurrent runners (the job and the
+ * CLI) share one cursor, and it never moves backward within a pass.
+ *
+ * Why passes: whether an @name resolves depends on the creators that exist. A
+ * platformless "@sam" linked to Instagram "sam" becomes ambiguous once a later
+ * post creates TikTok "u-sam". So when a pass reaches the end having made any
+ * creator, the checkpoint goes back to 0 and the next pass re-resolves every
+ * post, removing links that no longer hold; this repeats until a pass makes
+ * no creator, at most BACKFILL_MAX_PASSES passes. Finished, the pass resets to
+ * 1 and the checkpoint stays at the end, so a later run reads only new posts.
+ *
+ * A post whose mentions cannot be stored writes nothing: the posts before it
+ * commit with the checkpoint just before it, and BackfillStopped is thrown, so
+ * a rerun retries that post. `statsFor(pass)` gives the counters of a pass.
+ */
+export function metadataBackfillApplyBatch(limit: number, statsFor: (pass: number) => { stats: BackfillStats; seen: BackfillSeen }): BackfillApplyStep {
+  const get = db.prepare('SELECT value FROM settings WHERE key = ?').pluck();
+  const put = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
   let failed: { id: number; message: string } | null = null;
-  const read = db
-    .transaction(() => {
-      // Another runner (the job and the CLI) may have moved the checkpoint past
-      // this one's cursor: start after the larger, so it never moves backward.
-      const persisted = Number(db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get(BACKFILL_CURSOR_KEY) ?? 0) || 0;
-      const from = Math.max(afterId, persisted);
-      const rows = select(from);
+  const step = db
+    .transaction((): BackfillApplyStep => {
+      const after = Number(get.get(BACKFILL_CURSOR_KEY) ?? 0) || 0;
+      let state = { pass: 1, created: false };
+      try {
+        const v = JSON.parse(String(get.get(BACKFILL_PASS_KEY) ?? '{}'));
+        if (Number.isInteger(v?.pass) && v.pass >= 1) state = { pass: v.pass, created: !!v.created };
+      } catch {
+        // Unreadable pass state: start as pass 1.
+      }
+      const rows = selectBackfillRows(after, limit);
+      if (rows.length === 0) {
+        if (state.created && state.pass < BACKFILL_MAX_PASSES) {
+          put.run(BACKFILL_CURSOR_KEY, '0');
+          put.run(BACKFILL_PASS_KEY, JSON.stringify({ pass: state.pass + 1, created: false }));
+          return { read: 0, pass: state.pass, next: 'pass', capped: false };
+        }
+        put.run(BACKFILL_PASS_KEY, JSON.stringify({ pass: 1, created: false }));
+        return { read: 0, pass: state.pass, next: 'done', capped: state.created };
+      }
+      const { stats, seen } = statsFor(state.pass);
+      const one = backfillPostStep(true, stats, seen);
+      const createdBefore = stats.newCreators;
+      let last = after;
       for (const p of rows) {
         const before = { ...stats, skipped: { ...stats.skipped } };
         const reusedBefore = new Set(seen.reused);
         try {
           // A savepoint per post: a failed post leaves no partial rows behind.
           db.transaction(() => one(p))();
+          last = p.id;
         } catch (err) {
           Object.assign(stats, before);
           seen.reused.clear();
@@ -753,15 +805,54 @@ export function metadataBackfillBatch(
           break;
         }
       }
-      if (rows.length && stats.lastId > from) {
-        db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(BACKFILL_CURSOR_KEY, String(stats.lastId));
-      }
-      return rows.length;
+      if (last > after) put.run(BACKFILL_CURSOR_KEY, String(last));
+      if (stats.newCreators > createdBefore && !state.created) put.run(BACKFILL_PASS_KEY, JSON.stringify({ pass: state.pass, created: true }));
+      return { read: rows.length, pass: state.pass, next: 'more', capped: false };
     })
     .immediate();
   if (failed) {
     const f = failed as { id: number; message: string };
     throw new BackfillStopped(`Mentions of post ${f.id} could not be stored (${f.message}); the backfill stopped before it and resumes there`);
   }
-  return read;
+  return step;
+}
+
+export interface BackfillPassReport {
+  pass: number;
+  stats: BackfillStats;
+}
+
+/**
+ * An apply run, shared by the metadata_backfill job and the CLI: batches until
+ * the stored state says finished (or `stopped()`), with `pause()` between
+ * batches. Resumes wherever the stored state is, mid-pass included. Returns
+ * the counters of each pass it worked on; BackfillStopped propagates.
+ */
+export async function metadataBackfillApply(opts: {
+  batch: number;
+  pause: () => Promise<void>;
+  stopped?: () => boolean;
+  log?: (msg: string) => void;
+}): Promise<{ passes: BackfillPassReport[]; done: boolean; capped: boolean }> {
+  const passes: BackfillPassReport[] = [];
+  const seenOf = new Map<number, BackfillSeen>();
+  const statsFor = (pass: number) => {
+    let r = passes.find((x) => x.pass === pass);
+    if (!r) {
+      r = { pass, stats: emptyBackfillStats() };
+      passes.push(r);
+      seenOf.set(pass, { names: new Set(), tags: new Set(), reused: new Set() });
+    }
+    return { stats: r.stats, seen: seenOf.get(pass)! };
+  };
+  for (;;) {
+    if (opts.stopped?.()) return { passes, done: false, capped: false };
+    const s = metadataBackfillApplyBatch(opts.batch, statsFor);
+    if (s.next === 'done') {
+      if (s.capped) opts.log?.(`Pass ${s.pass} still made creators; stopped at ${BACKFILL_MAX_PASSES} passes`);
+      return { passes, done: true, capped: s.capped };
+    }
+    if (s.next === 'pass') opts.log?.(`Pass ${s.pass} made creators; pass ${s.pass + 1} re-reads every post`);
+    else await opts.pause();
+  }
 }

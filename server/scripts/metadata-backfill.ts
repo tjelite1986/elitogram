@@ -2,38 +2,51 @@
 //   node dist/server/scripts/metadata-backfill.js            dry run: reads only, prints what applying would write
 //   node dist/server/scripts/metadata-backfill.js --apply    applies in resumable batches, like the metadata_backfill job
 // DATA_DIR picks the database, as for the server. A dry run is safe on the live database.
+// A dry run is one pass in id order; an apply adds reconciliation passes when a
+// pass made creators (see metadataBackfillApplyBatch), which a dry run cannot forecast.
 import { db } from '../db/index.js';
-import { BACKFILL_CURSOR_KEY, BackfillStopped, emptyBackfillStats, metadataBackfillBatch } from '../library.js';
+import { BACKFILL_CURSOR_KEY, BackfillStopped, emptyBackfillStats, metadataBackfillApply, metadataBackfillDryBatch, type BackfillPassReport } from '../library.js';
 
 const apply = process.argv.includes('--apply');
 const batch = 200;
-const stats = emptyBackfillStats();
-const seen = { names: new Set<string>(), tags: new Set<string>(), reused: new Set<number>() };
-const get = db.prepare('SELECT value FROM settings WHERE key = ?').pluck();
-// A dry run always reads everything; an apply continues where the last one stopped.
-let after = apply ? Number(get.get(BACKFILL_CURSOR_KEY) ?? 0) || 0 : 0;
-const total = db.prepare('SELECT COUNT(*) FROM posts WHERE deleted = 0 AND id > ?').pluck().get(after) as number;
 const started = Date.now();
-console.log(`${apply ? 'APPLY' : 'DRY RUN'}: ${total} posts after id ${after}`);
-// An apply batch stores its own checkpoint in the transaction that writes it.
-let stopped: string | null = null;
-for (let i = 1; ; i++) {
-  let n: number;
+const mentionCreators = () => db.prepare("SELECT COUNT(*) FROM creators WHERE origin = 'mention'").pluck().get();
+
+if (!apply) {
+  const stats = emptyBackfillStats();
+  const seen = { names: new Set<string>(), tags: new Set<string>(), reused: new Set<number>() };
+  console.log(`DRY RUN: ${db.prepare('SELECT COUNT(*) FROM posts WHERE deleted = 0').pluck().get()} posts (one pass)`);
+  let after = 0;
+  while (metadataBackfillDryBatch(after, batch, stats, seen) > 0) after = stats.lastId;
+  console.log(JSON.stringify({ mode: 'dry-run', ...stats, mentionCreatorsInDb: mentionCreators(), seconds: Math.round((Date.now() - started) / 1000) }, null, 2));
+} else {
+  const after = Number(db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get(BACKFILL_CURSOR_KEY) ?? 0) || 0;
+  console.log(`APPLY: continuing after post id ${after}`);
+  let stopped: string | null = null;
+  let run: { passes: BackfillPassReport[]; done: boolean; capped: boolean } = { passes: [], done: false, capped: false };
   try {
-    n = metadataBackfillBatch(after, batch, apply, stats, seen);
+    run = await metadataBackfillApply({ batch, pause: () => new Promise((r) => setTimeout(r, 150)), log: (m) => console.log(`  ${m}`) });
   } catch (err) {
     if (!(err instanceof BackfillStopped)) throw err;
     stopped = err.message;
-    break;
   }
-  if (n === 0) break;
-  after = stats.lastId;
-  if (apply) await new Promise((r) => setTimeout(r, 150));
-  if (i % 25 === 0) console.log(`  ${stats.scanned} of ${total}`);
-}
-const creatorsByOrigin = db.prepare("SELECT COUNT(*) FROM creators WHERE origin = 'mention'").pluck().get();
-console.log(JSON.stringify({ mode: apply ? 'apply' : 'dry-run', ...stats, mentionCreatorsInDb: creatorsByOrigin, seconds: Math.round((Date.now() - started) / 1000) }, null, 2));
-if (stopped) {
-  console.error(stopped);
-  process.exitCode = 1;
+  const total = (k: 'newCreators' | 'newRelations' | 'removedRelations' | 'scanned') => run.passes.reduce((n, p) => n + p.stats[k], 0);
+  console.log(
+    JSON.stringify(
+      {
+        mode: 'apply',
+        passes: run.passes.map((p) => ({ pass: p.pass, ...p.stats })),
+        totals: { scanned: total('scanned'), newCreators: total('newCreators'), newRelations: total('newRelations'), removedRelations: total('removedRelations') },
+        capped: run.capped,
+        mentionCreatorsInDb: mentionCreators(),
+        seconds: Math.round((Date.now() - started) / 1000),
+      },
+      null,
+      2,
+    ),
+  );
+  if (stopped) {
+    console.error(stopped);
+    process.exitCode = 1;
+  }
 }
