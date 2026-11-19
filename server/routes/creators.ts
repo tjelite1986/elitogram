@@ -6,7 +6,7 @@ import { creatorScopeSql, parseClassify, refuseScoped, scopeOf, scopeSql } from 
 import { parseCursor, cursorSql, nextCursor, gridTiles, POST_FROM, visible } from '../views.js';
 import { parseUpload } from '../media/upload.js';
 import { APP_DIRS, isReservedName, mediaRel, placeFile, sniffFile, validateHandle } from '../media/files.js';
-import { createCreator, findCreatorByName, MediaRejected, moveMediaToAuthor, reindexCreator, withMoveLock } from '../library.js';
+import { createCreator, findCreatorByName, MediaRejected, moveMediaToAuthor, reindexCreator, returnMediaHome, withMoveLock } from '../library.js';
 import { notify } from '../notify.js';
 
 export const creators = Router();
@@ -397,8 +397,20 @@ creators.post(
     let postIds: number[] = [];
     // No post edit moves files while the merge does (withMoveLock).
     await withMoveLock(async () => {
+      // Another merge may have finished while this one waited: both profiles must still exist.
+      for (const c of [from, into]) {
+        const now_ = db.prepare('SELECT handle, deleted FROM creators WHERE id = ?').get(c.id) as { handle: string; deleted: number } | undefined;
+        if (!now_ || now_.deleted || now_.handle !== c.handle) throw new HttpError(409, `${c.handle} changed meanwhile; reload and try again`);
+      }
       postIds = db.prepare('SELECT id FROM posts WHERE creator_id = ?').pluck().all(from.id) as number[];
-      await moveMediaToAuthor(postIds, { creatorId: into.id });
+      const moved: number[] = [];
+      try {
+        await moveMediaToAuthor(postIds, { creatorId: into.id }, moved);
+      } catch (err) {
+        // The merge wrote nothing: the files go back to their posts' authors.
+        await returnMediaHome(moved);
+        throw err;
+      }
       db.transaction(() => {
         // The source is read again here: it may have been classified (18+ or
         // general) while the files were moving, and the merged profile must carry

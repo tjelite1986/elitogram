@@ -131,10 +131,12 @@ export async function uniqueTarget(dirRel: string, nameHint: string, ext: string
 
 /**
  * Moves a file without ever replacing one: an existing `dest` fails with EEXIST.
- * A hard link places the file, then the source goes; across file systems (or
- * where hard links are not allowed) an exclusive copy does. When the source
- * cannot be removed (another move took it first), the new copy is removed again
- * so no untracked file is left behind.
+ * A hard link places the file, then the source goes. Across mounts (or where
+ * the source cannot be linked) the bytes are copied to a temporary name only
+ * this call owns, beside `dest`, and that copy is linked to `dest`; only the
+ * temporary name is ever cleaned up, so a failure never removes a file another
+ * writer placed. When the source cannot be removed afterwards (another move
+ * took it first), the new `dest`, which this call created, is removed again.
  */
 export async function moveFile(src: string, dest: string): Promise<void> {
   await fsp.mkdir(path.dirname(dest), { recursive: true });
@@ -142,12 +144,12 @@ export async function moveFile(src: string, dest: string): Promise<void> {
     await fsp.link(src, dest);
   } catch (err: any) {
     if (err.code !== 'EXDEV' && err.code !== 'EPERM' && err.code !== 'ENOTSUP') throw err;
+    const tmp = path.join(path.dirname(dest), `.${path.basename(dest)}.part-${crypto.randomBytes(6).toString('hex')}`);
     try {
-      await fsp.copyFile(src, dest, fs.constants.COPYFILE_EXCL);
-    } catch (copyErr: any) {
-      // A partial copy is ours to remove; an existing file (EEXIST) is not.
-      if (copyErr.code !== 'EEXIST') await fsp.unlink(dest).catch(() => undefined);
-      throw copyErr;
+      await fsp.copyFile(src, tmp, fs.constants.COPYFILE_EXCL);
+      await fsp.link(tmp, dest);
+    } finally {
+      await fsp.unlink(tmp).catch(() => undefined);
     }
   }
   try {

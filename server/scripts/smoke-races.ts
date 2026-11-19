@@ -8,8 +8,10 @@
  * creates its own creators, a member and a few posts, and removes them at the
  * end (posts and creators soft-deleted, the member disabled).
  *
- *   BASE=http://localhost:3932 SMOKE_USER=... SMOKE_PASS=... node --import tsx server/scripts/smoke-races.ts
+ *   BASE=http://localhost:3932 SMOKE_USER=... SMOKE_PASS=... [MEDIA_UPPER=/path/to/media] node --import tsx server/scripts/smoke-races.ts
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import sharp from 'sharp';
 
 const BASE = (process.env.BASE ?? 'http://localhost:3000').replace(/\/$/, '');
@@ -17,6 +19,8 @@ const USER = process.env.SMOKE_USER ?? '';
 const PASS = process.env.SMOKE_PASS ?? '';
 // Must be well inside the server's TEST_MOVE_DELAY_MS.
 const DURING_MS = Number(process.env.DURING_MS ?? '400');
+// Optional: the host folder where the server's media writes land (for the file-location check).
+const MEDIA_UPPER = process.env.MEDIA_UPPER ?? '';
 
 let failures = 0;
 let passes = 0;
@@ -100,13 +104,16 @@ async function main(): Promise<void> {
   const A = `smokerace-a-${tag}`;
   const B = `smokerace-b-${tag}`;
   const C = `smokerace-c-${tag}`;
+  const D = `smokerace-d-${tag}`;
+  const E = [1, 2, 3].map((i) => `smokerace-e${i}-${tag}`);
+  let modId = 0;
   const memberName = `smokerace-m-${tag}`;
   const memberPass = `pass-${tag}-${Math.random().toString(36).slice(2)}`;
   const posts: number[] = [];
   let memberId = 0;
   const member = new Client();
   try {
-    for (const h of [A, B, C]) check(`create creator ${h}`, (await admin.call('POST', '/api/creators', null, { handle: h })).status === 201);
+    for (const h of [A, B, C, D, ...E]) check(`create creator ${h}`, (await admin.call('POST', '/api/creators', null, { handle: h })).status === 201);
     const mk = await admin.call('POST', '/api/admin/users', null, { username: memberName, password: memberPass });
     memberId = mk.json?.id ?? 0;
     check('create member', mk.status === 201 && memberId > 0);
@@ -200,10 +207,53 @@ async function main(): Promise<void> {
     check('the post is under A again', (await admin.get(`/api/posts/${p5}`)).json?.author?.handle === A);
     check('the item is not general', (await member.get(`/m/${m5[1]}`, 'general')).status === 404);
     check('its media are served after the move back', await mediaServed(admin, p5));
+
+    // --- A moderator whose permission is revoked during the move ----------------
+    const mod = new Client();
+    const mkMod = await admin.call('POST', '/api/admin/users', null, { username: `${memberName}-mod`, password: memberPass });
+    modId = mkMod.json?.id ?? 0;
+    check('create moderator', mkMod.status === 201 && (await admin.call('PATCH', `/api/admin/users/${modId}`, null, { permissions: ['profiles'] })).status === 200);
+    check('moderator login', await mod.login(`${memberName}-mod`, memberPass));
+    const p6 = await upload(admin, A, 1);
+    posts.push(p6);
+    const move6 = mod.call('PATCH', `/api/posts/${p6}`, null, { author: { creator: B } });
+    await wait(DURING_MS);
+    const revoke = await admin2.call('PATCH', `/api/admin/users/${modId}`, null, { permissions: [] });
+    const r6 = await move6;
+    check('permission revoked meanwhile', revoke.status === 200, `${revoke.status}`);
+    check('the move under general B answers 409', r6.status === 409, `${r6.status} ${JSON.stringify(r6.json)}`);
+    check('the post stays under A, not general', (await admin.get(`/api/posts/${p6}`)).json?.author?.handle === A && (await admin.get(`/api/posts/${p6}`, 'general')).status === 404);
+
+    // --- An item removed by another edit during the move goes home too ----------
+    const p7 = await upload(admin, A, 2);
+    posts.push(p7);
+    const m7: number[] = ((await admin.get(`/api/posts/${p7}`)).json?.media ?? []).map((m: any) => m.id);
+    const move7 = admin.call('PATCH', `/api/posts/${p7}`, null, { author: { creator: D } });
+    await wait(DURING_MS);
+    const rm7 = await admin2.call('PATCH', `/api/posts/${p7}`, null, { removeMedia: [m7[1]] });
+    const r7 = await move7;
+    check('a removal lands meanwhile', rm7.status === 200, `${rm7.status} ${JSON.stringify(rm7.json)}`);
+    check('the move to D answers 409', r7.status === 409, `${r7.status}`);
+    check('the kept item is served', await mediaServed(admin, p7));
+    if (MEDIA_UPPER) {
+      const dir = path.join(MEDIA_UPPER, D);
+      const left = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => fs.statSync(path.join(dir, f)).isFile()) : [];
+      check('no file is left in the refused destination folder', left.length === 0, left.join(', '));
+    }
+
+    // --- A merge queued behind another merge of the same profile -----------------
+    for (const h of E) posts.push(await upload(admin, h, 1));
+    const merge1 = admin.call('POST', '/api/creators-merge', null, { from: E[0], into: E[1] });
+    await wait(DURING_MS);
+    const merge2 = await admin2.call('POST', '/api/creators-merge', null, { from: E[2], into: E[0] });
+    const r8 = await merge1;
+    check('the first merge succeeds', r8.status === 200, `${r8.status} ${JSON.stringify(r8.json)}`);
+    check('the queued merge into the merged-away profile answers 409', merge2.status === 409, `${merge2.status} ${JSON.stringify(merge2.json)}`);
+    check('the third profile keeps its post', (await admin.get(`/api/posts/${posts[posts.length - 1]}`)).json?.author?.handle === E[2]);
   } finally {
     for (const id of posts) await admin.call('DELETE', `/api/posts/${id}`, null).catch(() => undefined);
-    for (const h of [A, B, C]) await admin.call('DELETE', `/api/creators/${h}`, null).catch(() => undefined);
-    if (memberId) await admin.call('PATCH', `/api/admin/users/${memberId}`, null, { disabled: true }).catch(() => undefined);
+    for (const h of [A, B, C, D, ...E]) await admin.call('DELETE', `/api/creators/${h}`, null).catch(() => undefined);
+    for (const uid of [memberId, modId]) if (uid) await admin.call('PATCH', `/api/admin/users/${uid}`, null, { disabled: true }).catch(() => undefined);
   }
   console.log(`\n${passes} passed, ${failures} failed`);
   if (failures) process.exit(1);

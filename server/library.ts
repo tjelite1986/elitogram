@@ -269,45 +269,71 @@ export function withMoveLock<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/** Moves one media file into `dirRel` and re-points its row. -> true when it moved. */
+async function moveOneMedia(m: { id: number; path: string }, dirRel: string): Promise<boolean> {
+  if (m.path.startsWith(dirRel + '/')) return false;
+  const src = mediaAbs(m.path);
+  if (!fs.existsSync(src)) return false;
+  const upd = db.prepare('UPDATE media SET path = ? WHERE id = ?');
+  const ext = m.path.match(/\.[^./]+$/)?.[0] ?? '';
+  const dest = await placeFile(src, dirRel, m.path.split('/').pop() ?? 'file', ext);
+  try {
+    upd.run(mediaRel(dest), m.id);
+  } catch (err) {
+    // Back to its old name if that is still free, otherwise to a free name
+    // beside it; the row follows the file either way.
+    try {
+      await moveFile(dest, src);
+    } catch {
+      const srcDir = m.path.includes('/') ? m.path.slice(0, m.path.lastIndexOf('/')) : '';
+      const again = await placeFile(dest, srcDir, m.path.split('/').pop() ?? 'file', ext).catch(() => null);
+      if (again) {
+        try {
+          upd.run(mediaRel(again), m.id);
+        } catch (e2) {
+          console.error(`Media ${m.id}: row still names ${m.path}; its file is at ${again}: ${(e2 as Error).message}`);
+        }
+      } else console.error(`Media ${m.id}: row still names ${m.path}; its file is at ${dest}`);
+    }
+    throw err;
+  }
+  return true;
+}
+
 /**
  * Moves every media file of the given posts into the new author's folder and
  * re-points the rows. Used by "change author" and by merging creators; callers
- * hold withMoveLock. A file never replaces another one (placeFile).
+ * hold withMoveLock. A file never replaces another one (placeFile). Returns the
+ * ids of the media it moved, also when it fails part way (`moved` is filled as
+ * it goes), so a caller can put them back with returnMediaHome.
  */
-export async function moveMediaToAuthor(postIds: number[], author: Author): Promise<void> {
+export async function moveMediaToAuthor(postIds: number[], author: Author, moved: number[] = []): Promise<number[]> {
   const dirRel = authorDir(author);
   const rows = db
     .prepare(`SELECT id, path FROM media WHERE post_id IN (${postIds.map(() => '?').join(',') || 'NULL'})`)
     .all(...postIds) as { id: number; path: string }[];
-  const upd = db.prepare('UPDATE media SET path = ? WHERE id = ?');
-  for (const m of rows) {
-    if (m.path.startsWith(dirRel + '/')) continue;
-    const src = mediaAbs(m.path);
-    if (!fs.existsSync(src)) continue;
-    const ext = m.path.match(/\.[^./]+$/)?.[0] ?? '';
-    const dest = await placeFile(src, dirRel, m.path.split('/').pop() ?? 'file', ext);
+  for (const m of rows) if (await moveOneMedia(m, dirRel)) moved.push(m.id);
+  if (config.testMoveDelayMs) await new Promise((r) => setTimeout(r, config.testMoveDelayMs));
+  return moved;
+}
+
+/**
+ * Puts each of these media files in the folder of the author of the post that
+ * owns its row now (a removed item may meanwhile belong to a holder post).
+ * Used after a refused or failed reassignment; errors are logged, not thrown.
+ */
+export async function returnMediaHome(mediaIds: number[]): Promise<void> {
+  for (const id of mediaIds) {
     try {
-      upd.run(mediaRel(dest), m.id);
+      const m = db
+        .prepare('SELECT m.id, m.path, p.creator_id, p.user_id FROM media m JOIN posts p ON p.id = m.post_id WHERE m.id = ?')
+        .get(id) as { id: number; path: string; creator_id: number | null; user_id: number | null } | undefined;
+      if (!m) continue;
+      await moveOneMedia(m, authorDir(m.creator_id ? { creatorId: m.creator_id } : { userId: m.user_id }));
     } catch (err) {
-      // Back to its old name if that is still free, otherwise to a free name
-      // beside it; the row follows the file either way.
-      try {
-        await moveFile(dest, src);
-      } catch {
-        const srcDir = m.path.includes('/') ? m.path.slice(0, m.path.lastIndexOf('/')) : '';
-        const again = await placeFile(dest, srcDir, m.path.split('/').pop() ?? 'file', ext).catch(() => null);
-        if (again) {
-          try {
-            upd.run(mediaRel(again), m.id);
-          } catch (e2) {
-            console.error(`Media ${m.id}: row still names ${m.path}; its file is at ${again}: ${(e2 as Error).message}`);
-          }
-        } else console.error(`Media ${m.id}: row still names ${m.path}; its file is at ${dest}`);
-      }
-      throw err;
+      console.error(`Could not move media ${id} back: ${(err as Error).message}`);
     }
   }
-  if (config.testMoveDelayMs) await new Promise((r) => setTimeout(r, config.testMoveDelayMs));
 }
 
 export function findCreatorByName(name: string): { id: number; handle: string } | undefined {

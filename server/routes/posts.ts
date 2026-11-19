@@ -5,7 +5,7 @@ import { ah, HttpError, intParam, str } from '../http.js';
 import { creatorScopeSql, effectiveAudience, isScoped, parseClassify, scopeOf, scopeSql } from '../audience.js';
 import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles } from '../views.js';
 import { parseUpload } from '../media/upload.js';
-import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, parseMentions, setPostHashtags, withMoveLock, type Author } from '../library.js';
+import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, parseMentions, returnMediaHome, setPostHashtags, withMoveLock, type Author } from '../library.js';
 import { notify, notifyFollowers } from '../notify.js';
 
 export const posts = Router();
@@ -334,20 +334,23 @@ const CHANGED = 'The post changed while it was being edited; reload it and try a
 
 /**
  * Everything a post edit is decided on: the post's 18+ flag, audience,
- * deletion and author, its creator's classification, its media list, and the
- * destination creator's classification and deletion. PATCH reads it with its
- * checks and compares it again inside the commit transaction.
+ * deletion and author, its creator's classification, its media (each id with
+ * its missing flag), the destination creator's classification and deletion,
+ * and the acting user's role, permissions and disabled flag. PATCH reads it
+ * with its checks and compares it again before moving files and inside the
+ * commit transaction.
  */
-function editState(postId: number, destCreatorId: number | null): string {
+function editState(postId: number, destCreatorId: number | null, userId: number): string {
   const p = db
     .prepare(
       `SELECT p.adult, p.audience, p.deleted, p.creator_id, p.user_id, c.adult AS c_adult, c.audience AS c_audience, c.deleted AS c_deleted,
-              (SELECT COUNT(*) FROM media m WHERE m.post_id = p.id) AS n, (SELECT MAX(m.id) FROM media m WHERE m.post_id = p.id) AS last
+              (SELECT group_concat(m.id || ':' || m.missing, ',') FROM (SELECT id, missing FROM media WHERE post_id = p.id ORDER BY id) m) AS media
        FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.id = ?`,
     )
     .get(postId);
   const d = destCreatorId ? db.prepare('SELECT adult, audience, deleted FROM creators WHERE id = ?').get(destCreatorId) : null;
-  return JSON.stringify([p ?? null, d ?? null]);
+  const u = db.prepare('SELECT role, permissions, disabled FROM users WHERE id = ?').get(userId);
+  return JSON.stringify([p ?? null, d ?? null, u ?? null]);
 }
 
 posts.patch(
@@ -396,10 +399,10 @@ posts.patch(
     // the post has now. This holds for moderators too: a stale request never
     // overwrites a newer classification.
     const destId = author?.creatorId ?? null;
-    const before = editState(id, destId);
+    const before = editState(id, destId, req.user!.id);
     const caption = typeof body.caption === 'string' ? str(body.caption) : null;
     const commit = db.transaction((): string | null => {
-      if (editState(id, destId) !== before) return CHANGED;
+      if (editState(id, destId, req.user!.id) !== before) return CHANGED;
       // A post inherits 18+ from its creator; moving it keeps that restriction on
       // the post itself. Only a moderator who saw the 18+ creator may lift it.
       const keepAdult = !!author && !!row.c_adult && !classifier;
@@ -445,16 +448,22 @@ posts.patch(
     if (author) {
       const dest = author;
       refusal = await withMoveLock(async () => {
-        await moveMediaToAuthor([id], dest);
-        const r = commit();
-        if (r) {
-          // This request wrote nothing: the files go to the author the post has now.
-          const now_ = db.prepare('SELECT creator_id, user_id FROM posts WHERE id = ?').get(id) as { creator_id: number | null; user_id: number | null } | undefined;
-          if (now_) {
-            const back: Author = now_.creator_id ? { creatorId: now_.creator_id } : { userId: now_.user_id };
-            await moveMediaToAuthor([id], back).catch((err) => console.error(`Could not move the files of post ${id} back: ${(err as Error).message}`));
-          }
+        // Waiting for the lock may have taken a while: nothing moves on a stale decision.
+        if (editState(id, destId, req.user!.id) !== before) return CHANGED;
+        const moved: number[] = [];
+        let r: string | null;
+        try {
+          await moveMediaToAuthor([id], dest, moved);
+          r = commit();
+        } catch (err) {
+          await returnMediaHome(moved);
+          throw err;
         }
+        // Refused: this request wrote nothing, and every file it moved goes to
+        // the author of the post that owns it now (a removed item may belong
+        // to a holder post by now). Accepted: items this request removed go to
+        // their holder's author.
+        await returnMediaHome(r ? moved : toRemove);
         return r;
       });
     } else refusal = commit();
