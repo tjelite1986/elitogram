@@ -8,6 +8,10 @@ services:
     env_file: .env
     environment:
       TZ: Europe/Stockholm
+      # Grabbit 3.0.4: the key Grabbit's Duplicate Manager sends to /api/dedupe.
+      GRABBIT_DEDUPE_TOKEN_FILE: /run/secrets/grabbit_dedupe_token
+    secrets:
+      - grabbit_dedupe_token
     volumes:
       - egram_data:/data
       - ${MEDIA_HOST_DIR:?set MEDIA_HOST_DIR in .env}:/media
@@ -23,6 +27,11 @@ services:
       - "traefik.http.routers.egram-secure.tls=true"
       - "traefik.http.routers.egram-secure.tls.certresolver=cloudflare"
       - "traefik.http.services.egram-service.loadbalancer.server.port=3000"
+
+secrets:
+  grabbit_dedupe_token:
+    # The same file Grabbit mounts (outside every repo).
+    file: /home/thomas/dockdata2/grabbit-secrets/dedupe-token
 
 volumes:
   egram_data:
