@@ -11,7 +11,9 @@ import { notify } from '../notify.js';
 
 export const creators = Router();
 
-function loadCreator(req: Request, handle: string): any {
+// allowLimited: only the read routes (profile, posts, mentioned) accept a limited
+// profile; every write (edit, pictures, follow, merge, delete) refuses it with 404.
+function loadCreator(req: Request, handle: string, { allowLimited = false } = {}): any {
   const c = db.prepare('SELECT * FROM creators WHERE handle = ? AND deleted = 0').get(handle.toLowerCase()) as any;
   if (!c) throw new HttpError(404, 'Profile not found');
   if (c.adult && !adultUnlocked(req)) throw new HttpError(404, 'Profile not found');
@@ -22,6 +24,7 @@ function loadCreator(req: Request, handle: string): any {
     // The limited profile names the handle and nothing else the creator owns
     // (no bio, links, aliases or picture), and lists only posts of the scope.
     const reachable =
+      allowLimited &&
       scope === 'general' &&
       db
         .prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${mentionTargetSql(req)} AND EXISTS (SELECT 1 FROM post_mentions pm JOIN posts p ON p.id = pm.post_id LEFT JOIN creators c ON c.id = p.creator_id LEFT JOIN users u ON u.id = p.user_id WHERE pm.creator_id = ? AND ${visible(req)})`)
@@ -285,11 +288,11 @@ creators.post('/creators', requirePerm('profiles'), (req, res) => {
 });
 
 creators.get('/creators/:handle', (req, res) => {
-  res.json(creatorJson(req, loadCreator(req, req.params.handle)));
+  res.json(creatorJson(req, loadCreator(req, req.params.handle, { allowLimited: true })));
 });
 
 creators.get('/creators/:handle/posts', (req, res) => {
-  const c = loadCreator(req, req.params.handle);
+  const c = loadCreator(req, req.params.handle, { allowLimited: true });
   const cur = cursorSql(parseCursor(req.query.cursor));
   const limit = 36;
   const rows = db
@@ -301,7 +304,7 @@ creators.get('/creators/:handle/posts', (req, res) => {
 // Posts of other authors whose caption mentions this creator (Grabbit 3.0.3).
 // Same files, same posts: only the post_mentions row ties them here.
 creators.get('/creators/:handle/mentioned', (req, res) => {
-  const c = loadCreator(req, req.params.handle);
+  const c = loadCreator(req, req.params.handle, { allowLimited: true });
   const cur = cursorSql(parseCursor(req.query.cursor));
   const limit = 36;
   const rows = db
