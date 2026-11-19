@@ -17,7 +17,31 @@ import { cacheClean, cacheRebuild, cacheStatus, type Cancel } from '../media/cac
  *   POST /api/dedupe/v1/lookup        { paths: [mediaRel] } -> which posts, creators or stories use each file
  *   GET  /api/dedupe/v1/cache                               -> thumbnail cache counts
  *   POST /api/dedupe/v1/cache/clean   { dryRun }            -> removes unused thumbnails
- *   POST /api/dedupe/v1/cache/rebuild { dryRun }            -> makes missing thumbnails, a batch at a time
+ *   POST /api/dedupe/v1/cache/rebuild { dryRun, retryFailed } -> makes missing thumbnails, a batch at a time
+ *
+ * cache/rebuild answers within about 15 s, counted from the request's arrival
+ * (the cache walk and DB query included), with:
+ *   made          thumbnails made by this call
+ *   failed        thumbnails that failed in this call
+ *   failures      [{ id, error, at }]: media ids parked as failed (this call or
+ *                 earlier ones), newest first, at most 20; error is short text
+ *   skipped       media skipped because their thumbnail is still being made in
+ *                 the background (an earlier call ran out of time on it) or
+ *                 failed within the last 30 minutes
+ *   missing       media still without a thumbnail, skipped ones included
+ *   remaining     of those, the ones a next call would try: skipped and just
+ *                 failed media are not counted, so looping while remaining > 0
+ *                 ends
+ *   inProgress    1 when this call ran out of time on a thumbnail that goes on
+ *                 in the background (that media is skipped from then on)
+ *   stoppedEarly  true when the call stopped before its batch was done
+ *   stopReason    'time' | 'disconnected' | null
+ *   discoveryIncomplete  true when the time ran out while finding what is
+ *                 missing; nothing was made and missing/remaining are null
+ * retryFailed: true forgets the parked failures first, so this call tries
+ * them again (in-flight ones stay skipped until they finish). The memory is
+ * per process and lasts 30 minutes per media id. dryRun answers
+ * { dryRun, missing, skipped, limit } and changes nothing.
  *
  * There is no link/restore/purge here: posts never share a media file in this
  * app, and a duplicate post is removed in Elitogram's own UI.
@@ -55,6 +79,8 @@ function tokenOk(given: string | undefined): boolean {
 }
 
 dedupe.use((req: Request, res: Response, next: NextFunction) => {
+  // Rebuild's time budget starts here, before auth, body parsing and the walk.
+  res.locals.startedAt = Date.now();
   if (!tokenOk(req.get('x-grabbit-dedupe-token'))) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
@@ -94,7 +120,8 @@ dedupe.post('/cache/clean', ah(async (req, res) => {
 }));
 dedupe.post('/cache/rebuild', ah(async (req, res) => {
   const cancel = cancelOnClose(res);
-  const out = await cacheRebuild(dryRunOf(req), cancel);
+  const startedAt = typeof res.locals.startedAt === 'number' ? res.locals.startedAt : Date.now();
+  const out = await cacheRebuild(dryRunOf(req), cancel, { startedAt, retryFailed: req.body?.retryFailed === true });
   if (!cancel.cancelled()) res.json(out);
 }));
 

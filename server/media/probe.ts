@@ -87,7 +87,7 @@ const EXCL = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL 
 /** Writes `data` to a fresh temp file next to `out`, then renames it into place. */
 async function publishExclusive(out: string, data: Buffer): Promise<void> {
   // The shard must be a real folder: a symlinked one would take the file elsewhere.
-  if (!fs.lstatSync(path.dirname(out)).isDirectory()) throw new Error('Thumbnail folder is not a real folder');
+  verifyShard(path.dirname(out));
   // Matches cache.ts TMP, so an interrupted write is cleaned up later.
   const tmp = `${out}.${process.pid}-${crypto.randomBytes(8).toString('hex')}.tmp`;
   const fh = await fsp.open(tmp, EXCL, 0o644);
@@ -96,7 +96,11 @@ async function publishExclusive(out: string, data: Buffer): Promise<void> {
     await fh.writeFile(data);
     await fh.sync();
     await fh.close();
-    await fsp.rename(tmp, out);
+    // Checked again right before the rename, with no await in between: while
+    // a video was being read, _thumbs or the shard may have been swapped for
+    // a symlink, and the rename would then land outside the cache.
+    verifyShard(path.dirname(out));
+    fs.renameSync(tmp, out);
     done = true;
   } finally {
     if (!done) {
@@ -104,6 +108,19 @@ async function publishExclusive(out: string, data: Buffer): Promise<void> {
       await fsp.unlink(tmp).catch(() => {});
     }
   }
+}
+
+/**
+ * Throws unless `_thumbs` and `shard` are real folders (lstat, no follow) and
+ * the shard resolves to exactly `<real media root>/_thumbs/<shard>`. What is
+ * left is the gap between this check and the rename, accepted for 3.0.4.
+ */
+function verifyShard(shard: string): void {
+  const thumbs = mediaAbs(APP_DIRS.thumbs);
+  if (path.dirname(shard) !== thumbs) throw new Error('Thumbnail folder is not under the cache');
+  if (!fs.lstatSync(thumbs).isDirectory() || !fs.lstatSync(shard).isDirectory()) throw new Error('Thumbnail folder is not a real folder');
+  const expected = path.join(fs.realpathSync(path.dirname(thumbs)), path.basename(thumbs), path.basename(shard));
+  if (fs.realpathSync(shard) !== expected) throw new Error('Thumbnail folder resolves outside the cache');
 }
 
 async function grabFrame(src: string): Promise<Buffer> {

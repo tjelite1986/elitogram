@@ -45,6 +45,15 @@ export interface Cancel {
 const never: Cancel = { cancelled: () => false };
 type StopReason = 'time' | 'disconnected' | null;
 
+/** Thrown by a walk whose time ran out; the rebuild answers with stopReason 'time'. */
+class OutOfTime extends Error {}
+
+/** When a walk must stop: out of time (throws OutOfTime) or client gone. */
+interface WalkLimit {
+  expired: () => boolean;
+}
+const unlimited: WalkLimit = { expired: () => false };
+
 type Kind = 'current' | 'legacy' | 'stale' | 'partial' | 'other';
 interface Entry {
   rel: string;
@@ -63,9 +72,10 @@ function identities(): Map<number, string> {
   return out;
 }
 
-async function walk(): Promise<Entry[]> {
+async function walk(limit: WalkLimit = unlimited): Promise<Entry[]> {
   const root = mediaAbs(APP_DIRS.thumbs);
   const ids = identities();
+  if (limit.expired()) throw new OutOfTime();
   const out: Entry[] = [];
   // The cache must be a real folder of this app's: a symlinked _thumbs would
   // point the cleaner at someone else's files.
@@ -110,6 +120,7 @@ async function walk(): Promise<Entry[]> {
     }
     // Let requests through between shards.
     await new Promise((r) => setImmediate(r));
+    if (limit.expired()) throw new OutOfTime();
   }
   const current = new Set(out.filter((e) => e.kind === 'current').map((e) => `${e.id}_${e.width}`));
   for (const e of out) if (e.kind === 'legacy' && current.has(`${e.id}_${e.width}`)) e.duplicate = true;
@@ -148,7 +159,7 @@ function stillRemovable(e: Entry): boolean {
 const removable = (e: Entry) => e.kind === 'legacy' || e.kind === 'stale' || e.kind === 'partial';
 
 // Media that would get a thumbnail and has no current one at the default width.
-function missing(entries: Entry[]): { id: number; path: string; kind: 'image' | 'video'; ident: string }[] {
+function missing(entries: Entry[]): { id: number; path: string; kind: 'image' | 'video'; ident: string; done?: boolean }[] {
   const have = new Set(entries.filter((e) => e.kind === 'current' && e.width === REBUILD_WIDTH).map((e) => e.id));
   const rows = db
     .prepare(
@@ -240,28 +251,79 @@ export function cacheClean(dryRun: boolean, cancel: Cancel = never) {
   });
 }
 
-export function cacheRebuild(dryRun: boolean, cancel: Cancel = never) {
+// Rebuild memory, per process: media that failed, or whose thumbnail is still
+// being made in the background after a call ran out of time. Later calls skip
+// them for REBUILD_PARK_MS, so one slow or broken video at the head of the
+// list cannot take every batch's budget and keep the healthy files behind it
+// from ever being reached. Keyed by media id; an entry for an older identity
+// (the file was replaced) does not count. retryFailed clears the failures.
+const REBUILD_PARK_MS = 30 * 60 * 1000;
+const FAILURES_LISTED = 20;
+interface Parked {
+  state: 'inflight' | 'failed';
+  ident: string;
+  at: number;
+  error?: string;
+}
+const parked = new Map<number, Parked>();
+
+function pruneParked(now: number) {
+  for (const [id, p] of parked) if (now - p.at > REBUILD_PARK_MS) parked.delete(id);
+}
+
+const shortError = (err: unknown) => String((err as Error)?.message ?? err).slice(0, 200);
+
+function parkFailed(id: number, ident: string, err: unknown) {
+  parked.set(id, { state: 'failed', ident, at: Date.now(), error: shortError(err) });
+}
+
+export interface RebuildOptions {
+  /** Date.now() at route entry: the time budget counts from here. */
+  startedAt?: number;
+  /** Forget earlier failures first, so this call tries those media again. */
+  retryFailed?: boolean;
+}
+
+export function cacheRebuild(dryRun: boolean, cancel: Cancel = never, opts: RebuildOptions = {}) {
+  const started = opts.startedAt ?? Date.now();
+  const budget = rebuildBudgetMs();
   return exclusive(async () => {
     // A _thumbs that exists but is not a real folder (a symlink or a file)
     // would have the rebuild write through it into someone else's files.
     if (present(mediaAbs(APP_DIRS.thumbs)) && !realDir(mediaAbs(APP_DIRS.thumbs))) {
       throw Object.assign(new Error('The thumbnail folder is not a real folder of this app; nothing was written'), { status: 409 });
     }
-    const todo = missing(await walk());
-    if (dryRun) return { dryRun: true, missing: todo.length, limit: Math.min(REBUILD_LIMIT, todo.length) };
+    pruneParked(Date.now());
+    if (opts.retryFailed && !dryRun) for (const [id, p] of parked) if (p.state === 'failed') parked.delete(id);
+    // The budget covers discovery too: a slow cache walk or DB query must not
+    // leave a slow encode enough time to push the answer past Grabbit's 20 s.
+    const timeLeft = () => budget - (Date.now() - started);
+    let todo: ReturnType<typeof missing>;
+    try {
+      const entries = await walk({ expired: () => !dryRun && (timeLeft() <= 0 || cancel.cancelled()) });
+      todo = missing(entries);
+    } catch (err) {
+      if (!(err instanceof OutOfTime)) throw err;
+      return {
+        dryRun: false, made: 0, failed: 0, failures: listFailures(), missing: null, remaining: null, skipped: 0, inProgress: 0,
+        stoppedEarly: true, stopReason: (cancel.cancelled() ? 'disconnected' : 'time') as StopReason, discoveryIncomplete: true,
+      };
+    }
+    const isParked = (m: { id: number; ident: string }) => parked.get(m.id)?.ident === m.ident;
+    const work = todo.filter((m) => !isParked(m));
+    const skipped = todo.length - work.length;
+    if (dryRun) return { dryRun: true, missing: todo.length, skipped, limit: Math.min(REBUILD_LIMIT, work.length) };
     let made = 0;
     let failed = 0;
     let inProgress = 0;
     let stopReason: StopReason = null;
-    const started = Date.now();
-    const budget = rebuildBudgetMs();
-    for (const m of todo.slice(0, REBUILD_LIMIT)) {
+    for (const m of work.slice(0, REBUILD_LIMIT)) {
       // Nothing new starts once the time is spent or Grabbit has gone.
       if (cancel.cancelled()) {
         stopReason = 'disconnected';
         break;
       }
-      const left = budget - (Date.now() - started);
+      const left = timeLeft();
       if (left <= 0) {
         stopReason = 'time';
         break;
@@ -272,33 +334,57 @@ export function cacheRebuild(dryRun: boolean, cancel: Cancel = never) {
       if (present(mediaAbs(APP_DIRS.thumbs)) && !realDir(mediaAbs(APP_DIRS.thumbs))) break;
       if (present(shard) && !realDir(shard)) {
         failed++;
+        parkFailed(m.id, m.ident, 'Thumbnail folder is not a real folder');
         continue;
       }
       // A slow video does not hold the answer past the budget: it finishes in
-      // the background like a thumbnail made on view, and the next call finds
-      // it done (or waits on the same in-flight write, never a second one).
+      // the background like a thumbnail made on view, and is parked as in
+      // flight so later calls go past it instead of waiting on it again.
       let timer: NodeJS.Timeout | undefined;
       const late = new Promise<'late'>((r) => {
         timer = setTimeout(() => r('late'), left);
       });
+      const job = thumbnail(m.path, m.kind, key, REBUILD_WIDTH);
       try {
-        const r = await Promise.race([thumbnail(m.path, m.kind, key, REBUILD_WIDTH), late]);
+        const r = await Promise.race([job, late]);
         if (r === 'late') {
           inProgress++;
           stopReason = 'time';
+          parked.set(m.id, { state: 'inflight', ident: m.ident, at: Date.now() });
+          job.then(
+            () => {
+              if (parked.get(m.id)?.state === 'inflight') parked.delete(m.id);
+            },
+            (err) => parkFailed(m.id, m.ident, err),
+          );
           break;
         }
         made++;
-      } catch {
+        m.done = true;
+      } catch (err) {
         failed++;
+        parkFailed(m.id, m.ident, err);
       } finally {
         clearTimeout(timer);
       }
     }
-    // remaining: thumbnails still to make after this call (the same as missing,
-    // named like clean's); stoppedEarly says to call again before the batch
-    // limit was reached.
-    const left = Math.max(0, todo.length - made);
-    return { dryRun: false, made, failed, missing: left, remaining: left, inProgress, stoppedEarly: stopReason !== null, stopReason };
+    // missing: media still without a thumbnail, parked ones included.
+    // remaining: of those, the ones a next call would try (parked ones are
+    // left out), so a caller looping while remaining > 0 comes to an end.
+    const missingNow = todo.filter((m) => !m.done);
+    const remaining = missingNow.filter((m) => !isParked(m)).length;
+    return {
+      dryRun: false, made, failed, failures: listFailures(), missing: missingNow.length, remaining, skipped, inProgress,
+      stoppedEarly: stopReason !== null, stopReason, discoveryIncomplete: false,
+    };
   });
+}
+
+/** The most recent parked failures, newest first, at most FAILURES_LISTED. */
+function listFailures(): { id: number; error: string; at: number }[] {
+  return [...parked.entries()]
+    .filter(([, p]) => p.state === 'failed')
+    .sort((a, b) => b[1].at - a[1].at)
+    .slice(0, FAILURES_LISTED)
+    .map(([id, p]) => ({ id, error: p.error ?? 'failed', at: p.at }));
 }

@@ -132,7 +132,7 @@ fs.renameSync(path.join(media, '_thumbs.real'), path.join(media, '_thumbs'));
 // planted at the old predictable temp name is not followed.
 const victim = path.join(T, 'victim.txt');
 fs.writeFileSync(victim, 'victim');
-const extra = 30;
+const extra = 60;
 for (let i = 0; i < extra; i++) {
   const id = 10 + i;
   fs.writeFileSync(path.join(media, `alice/p${id}.png`), png);
@@ -143,11 +143,21 @@ const id10 = mediaIdentity({ id: 10, sha256: sha, path: 'alice/p10.png', created
 const out10 = `_thumbs/${`m${id10}`.slice(-2).padStart(2, '0')}/m${id10}_480.webp`;
 fs.mkdirSync(path.dirname(path.join(media, out10)), { recursive: true });
 fs.symlinkSync(victim, path.join(media, `${out10}.${process.pid}.tmp`));
-// A tiny time budget: the call answers with part of the work and says how
-// much is left.
-process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS = '1';
-const part = await call('POST', 'cache/rebuild', { dryRun: false });
-expect('tiny budget: partial rebuild with remaining', part.status === 200 && part.stoppedEarly === true && part.stopReason === 'time' && part.remaining > 0 && part.made < extra && part.missing === part.remaining);
+// The budget counts from the request's arrival and covers discovery: with
+// none left, the call stops before making anything.
+process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS = '0';
+const none = await call('POST', 'cache/rebuild', { dryRun: false });
+expect('zero budget: stops in discovery', none.status === 200 && none.discoveryIncomplete === true && none.stoppedEarly === true && none.stopReason === 'time' && none.made === 0 && none.remaining === null);
+// A small time budget: the call answers with part of the work and says how
+// much is left. The walk's own time varies, so grow the budget until a call
+// gets past discovery.
+let part: any = null;
+for (const ms of [20, 40, 80, 160, 320]) {
+  process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS = String(ms);
+  part = await call('POST', 'cache/rebuild', { dryRun: false });
+  if (!part.discoveryIncomplete) break;
+}
+expect('small budget: partial rebuild with remaining', part.status === 200 && part.discoveryIncomplete === false && part.stoppedEarly === true && part.stopReason === 'time' && part.remaining > 0 && part.made < extra && part.remaining === part.missing - part.inProgress && part.skipped === 0);
 delete process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS;
 let left = part.remaining;
 for (let i = 0; i < 5 && left > 0; i++) left = (await call('POST', 'cache/rebuild', { dryRun: false })).remaining;
@@ -155,6 +165,40 @@ expect('repeated rebuilds finish', left === 0);
 const out10St = fs.lstatSync(path.join(media, out10));
 expect('symlink at the old temp name not followed', fs.readFileSync(victim, 'utf8') === 'victim' && out10St.isFile() && !out10St.isSymbolicLink());
 expect('no temp files left by rebuild', !execList().split('\n').some((f) => /\.webp\.\d+-[0-9a-f]{16}\.tmp$/.test(f)));
+// A broken file at the head of the list fails once, is then skipped for 30
+// minutes, and does not hold back the healthy media behind it.
+const addMedia = (id: number, rel: string, body: Buffer | string, createdAt: number) => {
+  fs.writeFileSync(path.join(media, rel), body);
+  db.prepare("INSERT INTO posts (id, creator_id, caption, created_at, imported_at) VALUES (?,1,'extra',?,?)").run(id, createdAt, now);
+  db.prepare("INSERT INTO media (id, post_id, kind, mime, path, size, sha256, created_at) VALUES (?,?,'image','image/png',?,?,?,?)").run(id, id, rel, Buffer.byteLength(body), crypto.createHash('sha256').update(body).digest('hex'), now);
+};
+addMedia(200, 'alice/bad.png', 'not an image', now + 100_000);
+const f1 = await call('POST', 'cache/rebuild', { dryRun: false });
+expect('broken file fails and is listed', f1.failed === 1 && f1.made === 0 && f1.failures?.some((f: any) => f.id === 200 && typeof f.error === 'string') && f1.missing === 1 && f1.remaining === 0 && f1.stoppedEarly === false);
+addMedia(201, 'alice/p201.png', png, now + 50_000);
+const f2 = await call('POST', 'cache/rebuild', { dryRun: false });
+expect('failed file skipped on the next call, healthy one behind it made', f2.skipped === 1 && f2.failed === 0 && f2.made === 1 && f2.missing === 1 && f2.remaining === 0);
+const fd = await call('POST', 'cache/rebuild', {});
+expect('dry run counts the skipped file', fd.dryRun === true && fd.missing === 1 && fd.skipped === 1 && fd.limit === 0);
+const f3 = await call('POST', 'cache/rebuild', { dryRun: false, retryFailed: true });
+expect('retryFailed tries it again', f3.skipped === 0 && f3.failed === 1 && f3.made === 0 && f3.remaining === 0);
+fs.writeFileSync(path.join(media, 'alice/bad.png'), png);
+const f4 = await call('POST', 'cache/rebuild', { dryRun: false });
+expect('fixed file stays skipped without retryFailed', f4.skipped === 1 && f4.made === 0 && f4.remaining === 0);
+const f5 = await call('POST', 'cache/rebuild', { dryRun: false, retryFailed: true });
+expect('retryFailed makes it once fixed', f5.made === 1 && f5.skipped === 0 && f5.missing === 0 && f5.remaining === 0 && !f5.failures?.some((f: any) => f.id === 200));
+// A shard that is a symlink is refused at publish time, even when the
+// caller did not check it (a view request), and nothing lands behind it.
+const { thumbnail } = await import('../media/probe.js');
+fs.symlinkSync(elsewhere, path.join(media, '_thumbs/zz'));
+let refused = false;
+try {
+  await thumbnail('alice/a.png', 'image', 'mtestzz');
+} catch {
+  refused = true;
+}
+expect('thumbnail refuses a symlinked shard', refused && fs.readdirSync(elsewhere).length === 0);
+fs.unlinkSync(path.join(media, '_thumbs/zz'));
 const fin = await call('POST', 'cache/clean', { dryRun: false });
 expect('clean reports stoppedEarly false when it ran to the end', fin.stoppedEarly === false && fin.stopReason === null);
 // The token file is read on every request: a rotated token works at once,
