@@ -401,6 +401,8 @@ posts.patch(
     const destId = author?.creatorId ?? null;
     const before = editState(id, destId, req.user!.id);
     const caption = typeof body.caption === 'string' ? str(body.caption) : null;
+    // Media ids this request moved to a holder post (client ids of other posts never count).
+    const removed: number[] = [];
     const commit = db.transaction((): string | null => {
       if (editState(id, destId, req.user!.id) !== before) return CHANGED;
       // A post inherits 18+ from its creator; moving it keeps that restriction on
@@ -440,7 +442,7 @@ posts.patch(
           )
           .run(row.creator_id, row.user_id, req.user!.id, `Removed from post ${id}`, row.created_at, t, t, adult, holderAudience);
         const upd = db.prepare('UPDATE media SET post_id = ? WHERE id = ? AND post_id = ?');
-        for (const mid of toRemove) upd.run(Number(holder.lastInsertRowid), mid, id);
+        for (const mid of toRemove) if (upd.run(Number(holder.lastInsertRowid), mid, id).changes === 1) removed.push(mid);
       }
       return null;
     });
@@ -463,7 +465,7 @@ posts.patch(
         // the author of the post that owns it now (a removed item may belong
         // to a holder post by now). Accepted: items this request removed go to
         // their holder's author.
-        await returnMediaHome(r ? moved : toRemove);
+        await returnMediaHome(r ? moved : removed);
         return r;
       });
     } else refusal = commit();
