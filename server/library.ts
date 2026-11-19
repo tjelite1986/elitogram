@@ -75,60 +75,104 @@ const ACCOUNT_RE: Record<'instagram' | 'tiktok', RegExp> = { instagram: /^[a-z0-
 export type MentionPlan =
   | { name: string; action: 'link'; creatorId: number }
   | { name: string; action: 'create' }
-  | { name: string; action: 'skip'; reason: 'self' | 'invalid' | 'deleted' | 'other-account' };
+  | { name: string; action: 'skip'; reason: 'self' | 'invalid' | 'deleted' | 'other-account' | 'ambiguous' };
 
 /**
- * What one @name in a post's caption should point at, read-only. An account on
- * the post's platform is matched first (ig_handle / tiktok_handle), then a
- * creator handle or alias. A creator already tied to a different account on
- * that platform is never reused: accounts on different platforms are never
- * merged by a mention. A deleted creator is never revived.
+ * What one @name in a post's caption should point at, read-only.
+ *
+ * 1. Platform known: a creator holding that account on the post's platform
+ *    (ig_handle / tiktok_handle). Several creators claiming the same account
+ *    is ambiguous: the mention is skipped rather than guessed.
+ * 2. A creator whose handle or alias is the name, unless it holds a different
+ *    account on the post's platform (skipped: accounts on different platforms
+ *    are never merged by a mention). A creator known for that name only as an
+ *    account on the OTHER platform is ambiguous too: the same spelling on two
+ *    platforms may be two people, so a separate mention creator is made.
+ * 3. Platform unknown: a creator holding the name as an account on either
+ *    platform, when exactly one does.
+ * A deleted creator (by handle or alias) is never revived.
  */
 export function planMention(name: string, platform: Platform, authorId: number | null): MentionPlan {
   const n = name.toLowerCase();
   if (platform && !ACCOUNT_RE[platform].test(n)) return { name: n, action: 'skip', reason: 'invalid' };
   const col = platform === 'instagram' ? 'ig_handle' : platform === 'tiktok' ? 'tiktok_handle' : null;
-  let hit = (col ? db.prepare(`SELECT id, ${col} AS acct FROM creators WHERE ${col} = ? COLLATE NOCASE AND deleted = 0 ORDER BY id LIMIT 1`).get(n) : undefined) as
-    | { id: number; acct: string | null }
+  const otherCol = platform === 'instagram' ? 'tiktok_handle' : platform === 'tiktok' ? 'ig_handle' : null;
+  const link = (id: number): MentionPlan => (id === authorId ? { name: n, action: 'skip', reason: 'self' } : { name: n, action: 'link', creatorId: id });
+  if (col) {
+    const owners = db.prepare(`SELECT id FROM creators WHERE ${col} = ? COLLATE NOCASE AND deleted = 0 ORDER BY id LIMIT 2`).pluck().all(n) as number[];
+    if (owners.length > 1) return { name: n, action: 'skip', reason: 'ambiguous' };
+    if (owners.length === 1) return link(owners[0]);
+  }
+  const acct = col ? `c.${col}` : 'NULL';
+  const other = otherCol ? `c.${otherCol}` : 'NULL';
+  const hit = (db.prepare(`SELECT c.id, ${acct} AS acct, ${other} AS other FROM creators c WHERE c.handle = ? AND c.deleted = 0`).get(n) ??
+    db.prepare(`SELECT c.id, ${acct} AS acct, ${other} AS other FROM creator_aliases a JOIN creators c ON c.id = a.creator_id WHERE a.alias = ? AND c.deleted = 0`).get(n)) as
+    | { id: number; acct: string | null; other: string | null }
     | undefined;
-  if (!hit) {
-    const acct = col ? `c.${col}` : 'NULL';
-    hit = (db.prepare(`SELECT c.id, ${acct} AS acct FROM creators c WHERE c.handle = ? AND c.deleted = 0`).get(n) ??
-      db.prepare(`SELECT c.id, ${acct} AS acct FROM creator_aliases a JOIN creators c ON c.id = a.creator_id WHERE a.alias = ? AND c.deleted = 0`).get(n)) as
-      | { id: number; acct: string | null }
-      | undefined;
-    if (hit && hit.acct && hit.acct.toLowerCase() !== n) return { name: n, action: 'skip', reason: 'other-account' };
+  if (hit) {
+    if (hit.acct && hit.acct.toLowerCase() !== n) return { name: n, action: 'skip', reason: 'other-account' };
+    if (hit.id === authorId) return { name: n, action: 'skip', reason: 'self' };
+    // Known for this name only on the other platform: a separate creator.
+    if (!hit.acct && hit.other && hit.other.toLowerCase() === n) {
+      return validateHandle(`u-${n.replace(/^[_.]+/, '')}`) ? { name: n, action: 'skip', reason: 'invalid' } : { name: n, action: 'create' };
+    }
+    return link(hit.id);
   }
-  if (!hit && !platform) {
+  if (!platform) {
     // Platform unknown: the name may still be a known account on either one.
-    hit = db.prepare('SELECT id, NULL AS acct FROM creators WHERE (ig_handle = ? COLLATE NOCASE OR tiktok_handle = ? COLLATE NOCASE) AND deleted = 0 ORDER BY id LIMIT 1').get(n, n) as
-      | { id: number; acct: null }
-      | undefined;
+    const owners = db.prepare('SELECT id FROM creators WHERE (ig_handle = ? COLLATE NOCASE OR tiktok_handle = ? COLLATE NOCASE) AND deleted = 0 ORDER BY id LIMIT 2').pluck().all(n, n) as number[];
+    if (owners.length > 1) return { name: n, action: 'skip', reason: 'ambiguous' };
+    if (owners.length === 1) return link(owners[0]);
   }
-  if (hit) return hit.id === authorId ? { name: n, action: 'skip', reason: 'self' } : { name: n, action: 'link', creatorId: hit.id };
-  if (db.prepare('SELECT 1 FROM creators WHERE handle = ? AND deleted = 1').get(n)) return { name: n, action: 'skip', reason: 'deleted' };
+  if (
+    db.prepare('SELECT 1 FROM creators WHERE handle = ? AND deleted = 1').get(n) ||
+    db.prepare('SELECT 1 FROM creator_aliases a JOIN creators c ON c.id = a.creator_id WHERE a.alias = ? AND c.deleted = 1').get(n)
+  )
+    return { name: n, action: 'skip', reason: 'deleted' };
   if (validateHandle(n) && validateHandle(mentionHandle(n))) return { name: n, action: 'skip', reason: 'invalid' };
   return { name: n, action: 'create' };
 }
 
 /**
- * The creator handle for an @name. Most names are valid handles as they are.
- * One a handle cannot be (it starts with "_" or ".", which Elitogram reserves)
- * becomes "u-" + the name without those: no Instagram or TikTok account has a
- * "-", so it can never take a real account's handle. The written name is kept
- * as an alias and the display name.
+ * The preferred creator handle for an @name. Most names are valid handles as
+ * they are. One a handle cannot be (it starts with "_" or ".", which Elitogram
+ * reserves) becomes "u-" + the name without those: no Instagram or TikTok
+ * account has a "-", so it can never take a real account's handle. The
+ * written name is kept as an alias and the display name.
  */
 export function mentionHandle(name: string): string {
   return validateHandle(name) ? `u-${name.replace(/^[_.]+/, '')}` : name;
 }
 
 /**
+ * A handle nobody holds for a new mention creator: the name itself when it is
+ * a valid handle that no creator (live or deleted) holds as handle or alias,
+ * otherwise "u-<name>", "u-<name>-2", "u-<name>-3", ... ("_sam" and "__sam"
+ * both prefer "u-sam", so the second gets "u-sam-2").
+ */
+function freeMentionHandle(name: string): string {
+  const taken = db.prepare('SELECT 1 FROM creators WHERE handle = ? UNION ALL SELECT 1 FROM creator_aliases WHERE alias = ?');
+  const free = (h: string) => !validateHandle(h) && !taken.get(h, h);
+  if (free(name)) return name;
+  const base = `u-${name.replace(/^[_.]+/, '')}`;
+  for (let i = 1; i <= 1000; i++) {
+    const suffix = i === 1 ? '' : `-${i}`;
+    const h = base.slice(0, 60 - suffix.length) + suffix;
+    if (free(h)) return h;
+  }
+  throw new Error(`No free handle for @${name}`);
+}
+
+/**
  * A creator for an @name nobody had. It starts unclassified (never general),
  * not 18+, followed by nobody and with every poller off; origin = 'mention'
  * keeps it out of the avatar fetch and the creator lists until it owns posts.
+ * The written name becomes an alias only when no creator holds it yet; a
+ * creator made beside one known from the other platform is found again
+ * through its own platform account instead.
  */
 function createMentionedCreator(name: string, platform: Platform): number {
-  const handle = mentionHandle(name);
+  const handle = freeMentionHandle(name);
   const res = db
     .prepare(
       `INSERT INTO creators (handle, display_name, ig_handle, tiktok_handle, ig_autopoll, tiktok_autopoll, adult, audience, origin, created_at)
@@ -136,7 +180,9 @@ function createMentionedCreator(name: string, platform: Platform): number {
     )
     .run(handle, handle === name ? '' : name, platform === 'instagram' ? name : null, platform === 'tiktok' ? name : null, now());
   const id = Number(res.lastInsertRowid);
-  if (handle !== name) db.prepare('INSERT INTO creator_aliases (alias, creator_id) VALUES (?, ?)').run(name, id);
+  if (handle !== name && !db.prepare('SELECT 1 FROM creators WHERE handle = ? UNION ALL SELECT 1 FROM creator_aliases WHERE alias = ?').get(name, name)) {
+    db.prepare('INSERT INTO creator_aliases (alias, creator_id) VALUES (?, ?)').run(name, id);
+  }
   return id;
 }
 

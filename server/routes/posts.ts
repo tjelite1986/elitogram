@@ -5,7 +5,7 @@ import { ah, HttpError, intParam, str } from '../http.js';
 import { creatorScopeSql, effectiveAudience, isScoped, parseClassify, scopeOf, scopeSql } from '../audience.js';
 import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles, mentionOriginVisibleSql } from '../views.js';
 import { parseUpload } from '../media/upload.js';
-import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, linkMentionsSafely, parseMentions, returnMediaHome, setPostHashtags, withMoveLock, type Author } from '../library.js';
+import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, linkMentionsSafely, parseMentions, returnMediaHome, setPostHashtags, setPostMentions, withMoveLock, type Author } from '../library.js';
 import { notify, notifyFollowers } from '../notify.js';
 
 export const posts = Router();
@@ -415,8 +415,9 @@ posts.patch(
         setPostHashtags(id, caption);
       }
       // A new caption or a new author changes which creators the post mentions
-      // (the post's own creator is never one of them).
-      if (caption !== null || author) linkMentionsSafely(id);
+      // (the post's own creator is never one of them). Caption, hashtags and
+      // mentions commit together: a mention that cannot be stored fails the edit.
+      if (caption !== null || author) setPostMentions(id);
       if (typeof body.adult === 'boolean') db.prepare('UPDATE posts SET adult = ? WHERE id = ?').run(body.adult ? 1 : 0, id);
       if (keepAdult) db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
       // 'adult' sets the 18+ flag; general/unknown only change the audience and never clear 18+.
