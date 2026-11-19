@@ -166,8 +166,21 @@ async function main(): Promise<void> {
     check('general: a creator mentioned only in 18+ does not open', ca.status === 404, `HTTP ${ca.status}`);
     const ia = await get(`/api/creator-identities?h=${adultOnly}`, 'general');
     check('general: identities do not answer for it', ia.status === 200 && !(adultOnly in (ia.json?.items ?? {})), JSON.stringify(ia.json));
+    // Review: a creator known only from an 18+ caption does not exist there either.
     const cu = await get(`/api/creators/${adultOnly}`, 'unknown');
-    check('review: its profile opens, but "Mentioned in" hides the 18+ post', cu.status === 200 && !ids((await get(`/api/creators/${adultOnly}/mentioned`, 'unknown')).json).includes(ADULT_POST_ID));
+    check('review: a creator mentioned only in 18+ does not open', cu.status === 404, `HTTP ${cu.status}`);
+    const mu = await get(`/api/creators/${adultOnly}/mentioned`, 'unknown');
+    check('review: nor its "Mentioned in"', mu.status === 404, `HTTP ${mu.status}`);
+    const iu = await get(`/api/creator-identities?h=${adultOnly}`, 'unknown');
+    check('review: identities do not answer for it', iu.status === 200 && !(adultOnly in (iu.json?.items ?? {})), JSON.stringify(iu.json));
+    const su = await get(`/api/search?q=${adultOnly}`, 'unknown');
+    check('review: search does not offer it', su.status === 200 && !(su.json?.creators ?? []).some((x: any) => x.handle === adultOnly), JSON.stringify(su.json?.creators));
+    const au = await get(`/api/mentions?q=${adultOnly}`, 'unknown');
+    check('review: @-suggestions do not offer it', au.status === 200 && !(au.json?.items ?? []).some((x: any) => x.handle === adultOnly));
+    const lu = await get(`/api/creators?q=${adultOnly}`, 'unknown');
+    check('review: the creator list search does not find it', lu.status === 200 && !(lu.json?.items ?? []).some((x: any) => x.handle === adultOnly));
+    const cun = await get(`/api/creators/${adultOnly}`);
+    check('unscoped: the creator exists', cun.status === 200 && cun.json?.origin === 'mention', `HTTP ${cun.status}`);
     const ht = await get(`/api/hashtags/smokeadult${tag}`, 'general');
     check('general: the 18+ post is not under its hashtag', !ids(ht.json).includes(ADULT_POST_ID));
     const s = await get(`/api/search?q=${adultOnly}`, 'general');

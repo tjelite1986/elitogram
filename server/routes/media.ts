@@ -8,6 +8,7 @@ import { ah, intParam } from '../http.js';
 import { mediaAbs, mediaIdentity } from '../media/files.js';
 import { thumbnail } from '../media/probe.js';
 import { fallbackAvatar, fallbackBanner, mimeFor, sendFile } from '../media/serve.js';
+import { mentionOriginVisibleSql } from '../views.js';
 
 /** Media URLs: every one requires a session (mounted behind requireUser) and honours the 18+ gate. */
 export const media = Router();
@@ -151,7 +152,7 @@ function creatorPictureInScope(req: Request, id: number, source: string | null):
     if (!row || mediaIdentity(row) !== m[1]) return false;
   }
   return !!db
-    .prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND c.adult = 0 AND ${creatorScopeSql(scope)} AND NOT EXISTS (SELECT 1 FROM posts pa WHERE pa.creator_id = c.id AND pa.adult = 1)`)
+    .prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND c.adult = 0 AND ${creatorScopeSql(scope)} AND ${mentionOriginVisibleSql(req)} AND NOT EXISTS (SELECT 1 FROM posts pa WHERE pa.creator_id = c.id AND pa.adult = 1)`)
     .get(id);
 }
 

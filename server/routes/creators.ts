@@ -3,7 +3,7 @@ import { db, now } from '../db/index.js';
 import { adultUnlocked, can, requirePerm } from '../auth.js';
 import { ah, HttpError, str } from '../http.js';
 import { creatorScopeSql, parseClassify, refuseScoped, scopeOf, scopeSql } from '../audience.js';
-import { parseCursor, cursorSql, nextCursor, gridTiles, mentionTargetSql, POST_FROM, visible } from '../views.js';
+import { parseCursor, cursorSql, nextCursor, gridTiles, mentionOriginVisibleSql, mentionTargetSql, POST_FROM, visible } from '../views.js';
 import { parseUpload } from '../media/upload.js';
 import { APP_DIRS, isReservedName, mediaRel, placeFile, sniffFile, validateHandle } from '../media/files.js';
 import { createCreator, findCreatorByName, MediaRejected, moveMediaToAuthor, reindexCreator, returnMediaHome, withMoveLock } from '../library.js';
@@ -36,6 +36,9 @@ function loadCreator(req: Request, handle: string, { allowLimited = false } = {}
     if (!(allowLimited && limitedReachable(req, c.id))) throw new HttpError(404, 'Profile not found');
     c.limited = true;
   }
+  // A creator made for an @name, with no post of its own, exists in a scope
+  // only through a post of that scope that mentions it.
+  if (scope && !db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${mentionOriginVisibleSql(req)}`).get(c.id)) throw new HttpError(404, 'Profile not found');
   return c;
 }
 
@@ -137,7 +140,7 @@ creators.get('/creators', (req, res) => {
        FROM creators c
        LEFT JOIN (SELECT p.creator_id, COUNT(*) AS n, MAX(p.created_at) AS latest FROM posts p LEFT JOIN creators c ON c.id = p.creator_id
                   WHERE p.deleted = 0 ${adultPost} ${scopePost} GROUP BY p.creator_id) pc ON pc.creator_id = c.id
-       WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scope)} ${filter} ${mentionOnly}
+       WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scope)} AND ${mentionOriginVisibleSql(req)} ${filter} ${mentionOnly}
        ORDER BY (COALESCE(pc.n, 0) > 0) DESC, pc.latest DESC, c.handle
        LIMIT ${limit} OFFSET ${offset}`,
     )
@@ -228,7 +231,7 @@ creators.get('/creator-identities', (req, res) => {
   const moderator = req.user!.role === 'admin' || can(req.user!, 'profiles');
   const deletedOk = moderator ? '1=1' : '(p.uploader_id = @me OR p.user_id = @me)';
   const inScope = scope
-    ? `AND c.adult = 0 AND (${creatorScopeSql(scope)} OR EXISTS (SELECT 1 FROM posts p WHERE p.creator_id = c.id AND p.adult = 0 AND (p.deleted = 0 OR ${deletedOk}) AND ${scopeSql(scope)}))`
+    ? `AND c.adult = 0 AND ${mentionOriginVisibleSql(req)} AND (${creatorScopeSql(scope)} OR EXISTS (SELECT 1 FROM posts p WHERE p.creator_id = c.id AND p.adult = 0 AND (p.deleted = 0 OR ${deletedOk}) AND ${scopeSql(scope)}))`
     : adultUnlocked(req)
       ? ''
       : 'AND c.adult = 0';

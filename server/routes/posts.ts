@@ -3,7 +3,7 @@ import { db, now } from '../db/index.js';
 import { adultFilter, adultUnlocked, can, type SessionUser } from '../auth.js';
 import { ah, HttpError, intParam, str } from '../http.js';
 import { creatorScopeSql, effectiveAudience, isScoped, parseClassify, scopeOf, scopeSql } from '../audience.js';
-import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles } from '../views.js';
+import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles, mentionOriginVisibleSql } from '../views.js';
 import { parseUpload } from '../media/upload.js';
 import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, linkMentionsSafely, parseMentions, returnMediaHome, setPostHashtags, withMoveLock, type Author } from '../library.js';
 import { notify, notifyFollowers } from '../notify.js';
@@ -109,7 +109,7 @@ posts.get('/search', (req, res) => {
   const scope = scopeOf(req);
   const creators = db
     .prepare(
-      `SELECT c.id, c.handle, c.display_name, c.adult, c.audience FROM creators c WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scope)} AND (c.handle LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\'
+      `SELECT c.id, c.handle, c.display_name, c.adult, c.audience FROM creators c WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scope)} AND ${mentionOriginVisibleSql(req)} AND (c.handle LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\'
         OR EXISTS (SELECT 1 FROM creator_aliases a WHERE a.creator_id = c.id AND a.alias LIKE ? ESCAPE '\\'))
        ORDER BY (c.handle = ?) DESC, length(c.handle) LIMIT 8`,
     )
@@ -207,7 +207,7 @@ posts.get('/mentions', (req, res) => {
   const users = db.prepare("SELECT 'user' AS type, id, username AS handle, display_name AS name FROM users WHERE disabled = 0 AND username LIKE ? ESCAPE '\\' LIMIT 5").all(like) as any[];
   const adult = adultUnlocked(req) ? '' : 'AND c.adult = 0';
   const creators = db
-    .prepare(`SELECT 'creator' AS type, c.id, c.handle, c.display_name AS name FROM creators c WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scopeOf(req))} AND (c.handle LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\') LIMIT 8`)
+    .prepare(`SELECT 'creator' AS type, c.id, c.handle, c.display_name AS name FROM creators c WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scopeOf(req))} AND ${mentionOriginVisibleSql(req)} AND (c.handle LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\') LIMIT 8`)
     .all(like, like) as any[];
   res.json({
     items: [...users.map((u) => ({ ...u, avatar: `/m/ua/${u.id}` })), ...creators.map((c) => ({ ...c, avatar: `/m/ca/${c.id}` }))],
