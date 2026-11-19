@@ -5,7 +5,7 @@ import { ah, HttpError, intParam, str } from '../http.js';
 import { creatorScopeSql, effectiveAudience, isScoped, parseClassify, scopeOf, scopeSql } from '../audience.js';
 import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles } from '../views.js';
 import { parseUpload } from '../media/upload.js';
-import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, parseMentions, returnMediaHome, setPostHashtags, withMoveLock, type Author } from '../library.js';
+import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, linkMentionsSafely, parseMentions, returnMediaHome, setPostHashtags, withMoveLock, type Author } from '../library.js';
 import { notify, notifyFollowers } from '../notify.js';
 
 export const posts = Router();
@@ -37,7 +37,7 @@ posts.get('/feed', (req, res) => {
   const rows = db
     .prepare(`SELECT ${POST_COLS} ${POST_FROM} WHERE ${visible(req)} AND ${cur.sql} ${follow} ORDER BY p.created_at DESC, p.id DESC LIMIT ${PAGE}`)
     .all(...args) as any[];
-  res.json({ items: hydratePosts(rows, req.user!.id), next: nextCursor(rows, PAGE) });
+  res.json({ items: hydratePosts(rows, req.user!.id, req), next: nextCursor(rows, PAGE) });
 });
 
 /** Converts free text into a safe FTS5 prefix query. */
@@ -147,7 +147,7 @@ posts.get('/videos', (req, res) => {
        ORDER BY p.created_at DESC, m.id DESC LIMIT ${limit}`,
     )
     .all(...cur.args) as any[];
-  const hydrated = new Map(hydratePosts(rows, req.user!.id).map((p) => [p.id, p]));
+  const hydrated = new Map(hydratePosts(rows, req.user!.id, req).map((p) => [p.id, p]));
   const items = rows.map((r) => ({
     media_id: r.media_id,
     url: `/m/${r.media_id}`,
@@ -218,7 +218,7 @@ posts.get('/posts/:id', (req, res) => {
   const showDeleted = req.query.deleted === '1';
   const row = loadVisiblePost(req, id, showDeleted);
   if (!row || (row.deleted && !canEditPost(req.user!, row))) throw new HttpError(404, 'Post not found');
-  const [post] = hydratePosts([row], req.user!.id);
+  const [post] = hydratePosts([row], req.user!.id, req);
   post.can_edit = canEditPost(req.user!, row);
   res.json(post);
 });
@@ -413,6 +413,9 @@ posts.patch(
         db.prepare('UPDATE posts SET caption = ? WHERE id = ?').run(caption, id);
         setPostHashtags(id, caption);
       }
+      // A new caption or a new author changes which creators the post mentions
+      // (the post's own creator is never one of them).
+      if (caption !== null || author) linkMentionsSafely(id);
       if (typeof body.adult === 'boolean') db.prepare('UPDATE posts SET adult = ? WHERE id = ?').run(body.adult ? 1 : 0, id);
       if (keepAdult) db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
       // 'adult' sets the 18+ flag; general/unknown only change the audience and never clear 18+.
@@ -482,7 +485,7 @@ posts.patch(
       res.json({ id, out_of_scope: true, can_edit: true });
       return;
     }
-    const [post] = hydratePosts([after], req.user!.id);
+    const [post] = hydratePosts([after], req.user!.id, req);
     res.json({ ...post, can_edit: true });
   }),
 );
@@ -527,6 +530,8 @@ posts.post('/posts/:id/restore', (req, res) => {
   if (!row) throw new HttpError(404, 'Post not found');
   if (!canEditPost(req.user!, row)) throw new HttpError(403, 'Forbidden');
   db.prepare('UPDATE posts SET deleted = 0, deleted_at = NULL WHERE id = ?').run(id);
+  // The backfill skips deleted posts, so a restored one gets its mentions now.
+  linkMentionsSafely(id);
   indexPost(id);
   res.json({ ok: true, id });
 });

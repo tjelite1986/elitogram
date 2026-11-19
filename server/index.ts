@@ -20,7 +20,7 @@ import { registerJob, startScheduler, warnIfBackupDisabled } from './jobs/schedu
 import { runImport } from './jobs/importer.js';
 import { runInstagramJob, runTikTokJob } from './sync/sources.js';
 import {
-  runAvatarBackfill, runBackup, runDbMaintenance, runDownloaderUpdate, runDuplicateScan, runMissingCheck, runStoryExpiry,
+  runAvatarBackfill, runBackup, runDbMaintenance, runDownloaderUpdate, runDuplicateScan, runMetadataBackfill, runMissingCheck, runStoryExpiry,
 } from './jobs/maintenance.js';
 
 ensureMediaDirs();
@@ -36,6 +36,7 @@ registerJob({ name: 'missing_files', title: 'Missing files check', description: 
 registerJob({ name: 'story_expiry', title: 'Story expiry', description: 'Expires stories after 24 h and removes old story files', defaultInterval: 15, run: runStoryExpiry });
 registerJob({ name: 'db_backup', title: 'Database backup', description: `Consistent snapshot, keeps the newest ${config.backupKeep}`, defaultInterval: 1440, defaultEnabled: true, run: runBackup });
 registerJob({ name: 'db_maintenance', title: 'Database maintenance', description: 'Optimises indexes, prunes sessions, checkpoints the WAL', defaultInterval: 10080, run: runDbMaintenance });
+registerJob({ name: 'metadata_backfill', title: 'Mentions and hashtags', description: 'Links @mentions and #hashtags in existing captions; resumable, never changes captions or files', defaultInterval: 10080, run: runMetadataBackfill });
 registerJob({ name: 'update_downloaders', title: 'Update downloaders', description: 'Upgrades yt-dlp and gallery-dl', defaultInterval: 1440, run: runDownloaderUpdate });
 warnIfBackupDisabled();
 startScheduler();

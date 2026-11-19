@@ -1,0 +1,169 @@
+/**
+ * Smoke test for creator mentions and hashtags (Grabbit 3.0.3).
+ *
+ * Runs against a RUNNING server over HTTP. Point it at a copy of the database,
+ * never at production: it rewrites the captions of one general post and one
+ * 18+ post for the run (and restores both), and it leaves the creators the
+ * mentions made (origin 'mention', soft-deleted at the end).
+ *
+ *   BASE=http://localhost:3901 SMOKE_USER=... SMOKE_PASS=... ADULT_POST_ID=<18+ post> \
+ *     ADULT_CREATOR=<handle of an 18+ creator> node --import tsx server/scripts/smoke-mentions.ts
+ */
+const BASE = (process.env.BASE ?? 'http://localhost:3000').replace(/\/$/, '');
+const USER = process.env.SMOKE_USER ?? '';
+const PASS = process.env.SMOKE_PASS ?? '';
+const ADULT_POST_ID = Number(process.env.ADULT_POST_ID) || 0;
+const ADULT_CREATOR = (process.env.ADULT_CREATOR ?? '').toLowerCase();
+
+let cookie = '';
+let failures = 0;
+let passes = 0;
+
+function check(name: string, ok: boolean, detail = ''): void {
+  if (ok) passes++;
+  else failures++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` (${detail})` : ''}`);
+}
+
+type Scope = 'general' | 'unknown' | null;
+
+async function call(method: string, path: string, scope: Scope, body?: unknown): Promise<{ status: number; json: any }> {
+  const headers: Record<string, string> = { Origin: BASE, Cookie: cookie };
+  if (scope) headers['X-Egram-Audience'] = scope;
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const r = await fetch(BASE + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' });
+  const set = r.headers.get('set-cookie');
+  if (set) cookie = set.split(';')[0];
+  const text = await r.text();
+  let json: any = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = null;
+  }
+  return { status: r.status, json };
+}
+const get = (path: string, scope: Scope = null) => call('GET', path, scope);
+const handles = (post: any): string[] => (post?.mentions ?? []).map((m: any) => m.handle);
+const ids = (list: any): number[] => (list?.items ?? []).map((x: any) => x.id ?? x.post_id);
+
+async function main(): Promise<void> {
+  if (!USER || !PASS) throw new Error('Set SMOKE_USER and SMOKE_PASS');
+  const login = await call('POST', '/api/auth/login', null, { username: USER, password: PASS });
+  check('login', login.status === 200 && !!cookie, `HTTP ${login.status}`);
+
+  const tag = Date.now().toString(36);
+  const fresh = `smk_new_${tag}`;
+  const fresh2 = `smk.two_${tag}`;
+  const underscored = `_smk_under_${tag}`;
+  const adultOnly = `smk_adult_${tag}`;
+
+  // A general post and two other general creators that own posts (one to mention, one to receive the edit).
+  const feed = await get('/api/feed', 'general');
+  const post = (feed.json?.items ?? []).find((p: any) => p.author?.type === 'creator');
+  check('a general post to edit', !!post);
+  const author = post.author.handle as string;
+  const other = (feed.json.items as any[]).find((p) => p.author?.type === 'creator' && p.author.handle !== author)?.author.handle as string;
+  check('another general creator to mention', !!other);
+  const original = post.caption as string;
+
+  // --- Several mentions and hashtags in one caption, set by an edit ----------------------
+  const caption = `Model: @${fresh} with @${other} and @${author}. Also @${fresh2}, @${underscored} #smoketag${tag} #fotografía #Ålesund`;
+  const edit = await call('PATCH', `/api/posts/${post.id}`, null, { caption });
+  check('edit the caption', edit.status === 200, `HTTP ${edit.status} ${JSON.stringify(edit.json)?.slice(0, 200)}`);
+  const g = await get(`/api/posts/${post.id}`, 'general');
+  const gh = handles(g.json);
+  check('general: the new @names are links', gh.includes(fresh) && gh.includes(fresh2), gh.join(','));
+  check('general: an existing creator is linked', gh.includes(other.toLowerCase()), gh.join(','));
+  check('the post never mentions its own creator', !gh.includes(author.toLowerCase()));
+  const under = (g.json.mentions as any[]).find((m) => m.name === underscored);
+  check('an @_name gets a u- handle and keeps the written name', !!under && under.handle === `u-${underscored.replace(/^_+/, '')}`, JSON.stringify(under));
+  check('the caption is stored as written', g.json.caption === caption);
+
+  // --- The new creator: unclassified, not 18+, not followed, no poller ----------------------
+  const c = await get(`/api/creators/${fresh}`);
+  check('a creator was made for the new @name', c.status === 200 && c.json.origin === 'mention', `HTTP ${c.status}`);
+  check('it is unclassified, not 18+', c.json?.audience === 'unknown' && c.json?.adult === false, JSON.stringify(c.json?.audience));
+  check('nobody follows it and no poller runs', c.json?.following === false && c.json?.follower_count === 0 && !c.json?.ig_autopoll && !c.json?.tiktok_autopoll);
+  const lim = await get(`/api/creators/${fresh}`, 'general');
+  check('general: it opens as a limited profile', lim.status === 200 && lim.json.limited === true && lim.json.bio === '' && lim.json.has_avatar === false, `HTTP ${lim.status}`);
+  const men = await get(`/api/creators/${fresh}/mentioned`, 'general');
+  check('general: "Mentioned in" lists the post', ids(men.json).includes(post.id));
+  const pub = await get(`/api/creators/${fresh}/posts`, 'general');
+  check('general: it has no published posts', (pub.json?.items ?? []).length === 0);
+  const otherMen = await get(`/api/creators/${other}/mentioned`, 'general');
+  check('the existing creator lists the post too', ids(otherMen.json).includes(post.id));
+  const ownMen = await get(`/api/creators/${author}/mentioned`, 'general');
+  check('the author does not list its own post as a mention', !ids(ownMen.json).includes(post.id));
+
+  // --- Lists stay clean ----------------------------------------------------------------------
+  const listAll = await get('/api/creators');
+  check('the creator list leaves out empty mention creators', !(listAll.json?.items ?? []).some((x: any) => x.handle === fresh));
+  const listQ = await get(`/api/creators?q=${fresh}`);
+  check('a search finds it', (listQ.json?.items ?? []).some((x: any) => x.handle === fresh));
+  const listGen = await get(`/api/creators?q=${fresh}`, 'general');
+  check('the general creator list never shows it', !(listGen.json?.items ?? []).some((x: any) => x.handle === fresh));
+
+  // --- Hashtags: international characters, one row per tag ----------------------------------
+  for (const t of [`smoketag${tag}`, 'fotografía', 'ålesund']) {
+    const h = await get(`/api/hashtags/${encodeURIComponent(t)}`, 'general');
+    check(`#${t} lists the post`, ids(h.json).includes(post.id), `HTTP ${h.status}`);
+  }
+
+  // --- Duplicates: the same names again, other spelling -------------------------------------
+  const again = await call('PATCH', `/api/posts/${post.id}`, null, { caption: `${caption} @${fresh.toUpperCase()} #SMOKETAG${tag}` });
+  check('edit again with the same names', again.status === 200);
+  const g2 = await get(`/api/posts/${post.id}`, 'general');
+  check('no duplicate mention rows', handles(g2.json).filter((h) => h === fresh).length === 1, handles(g2.json).join(','));
+  const dupe = await get(`/api/creators?q=smk_new_${tag}`);
+  check('no duplicate creator', (dupe.json?.items ?? []).filter((x: any) => x.handle.startsWith(`smk_new_${tag}`)).length === 1);
+
+  // --- Removing a mention removes the link, not the creator ----------------------------------
+  const less = await call('PATCH', `/api/posts/${post.id}`, null, { caption: `Model: @${other}` });
+  check('edit drops the new names', less.status === 200);
+  const g3 = await get(`/api/posts/${post.id}`, 'general');
+  check('the dropped names are no longer links', !handles(g3.json).includes(fresh) && handles(g3.json).includes(other.toLowerCase()), handles(g3.json).join(','));
+  const after = await get(`/api/creators/${fresh}/mentioned`);
+  check('"Mentioned in" no longer lists it', !ids(after.json).includes(post.id));
+  check('the creator itself stays', (await get(`/api/creators/${fresh}`)).status === 200);
+  const gone = await get(`/api/creators/${fresh}`, 'general');
+  check('general: with no general mention left it is not reachable', gone.status === 404, `HTTP ${gone.status}`);
+
+  // --- 18+ never shows in general through a mention ------------------------------------------
+  if (ADULT_CREATOR) {
+    await call('PATCH', `/api/posts/${post.id}`, null, { caption: `With @${ADULT_CREATOR}` });
+    const ga = await get(`/api/posts/${post.id}`, 'general');
+    check('general: an 18+ creator is never a link', !handles(ga.json).includes(ADULT_CREATOR), handles(ga.json).join(','));
+    const pa = await get(`/api/creators/${ADULT_CREATOR}`, 'general');
+    check('general: the 18+ creator does not open', pa.status === 404, `HTTP ${pa.status}`);
+    const ma = await get(`/api/creators/${ADULT_CREATOR}/mentioned`, 'general');
+    check('general: nor its "Mentioned in"', ma.status === 404, `HTTP ${ma.status}`);
+  } else console.log('skip ADULT_CREATOR not set');
+  if (ADULT_POST_ID) {
+    const ap = await get(`/api/posts/${ADULT_POST_ID}`);
+    const before = ap.json?.caption ?? '';
+    const e = await call('PATCH', `/api/posts/${ADULT_POST_ID}`, null, { caption: `${before} @${adultOnly} #smokeadult${tag}` });
+    check('edit the 18+ post', e.status === 200, `HTTP ${e.status}`);
+    const ca = await get(`/api/creators/${adultOnly}`, 'general');
+    check('general: a creator mentioned only in 18+ does not open', ca.status === 404, `HTTP ${ca.status}`);
+    const cu = await get(`/api/creators/${adultOnly}`, 'unknown');
+    check('review: its profile opens, but "Mentioned in" hides the 18+ post', cu.status === 200 && !ids((await get(`/api/creators/${adultOnly}/mentioned`, 'unknown')).json).includes(ADULT_POST_ID));
+    const ht = await get(`/api/hashtags/smokeadult${tag}`, 'general');
+    check('general: the 18+ post is not under its hashtag', !ids(ht.json).includes(ADULT_POST_ID));
+    const s = await get(`/api/search?q=${adultOnly}`, 'general');
+    check('general: search does not find the 18+ post', !JSON.stringify(s.json ?? {}).includes(`"id":${ADULT_POST_ID},`));
+    await call('PATCH', `/api/posts/${ADULT_POST_ID}`, null, { caption: before });
+  } else console.log('skip ADULT_POST_ID not set');
+
+  // --- Restore -------------------------------------------------------------------------------
+  const r = await call('PATCH', `/api/posts/${post.id}`, null, { caption: original });
+  check('restore the general caption', r.status === 200);
+  for (const h of [fresh, fresh2, `u-${underscored.replace(/^_+/, '')}`, adultOnly]) await call('DELETE', `/api/creators/${h}`, null);
+  console.log(`\n${passes} passed, ${failures} failed`);
+  process.exit(failures ? 1 : 0);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

@@ -1,7 +1,7 @@
 import type { Request } from 'express';
 import { db } from './db/index.js';
-import { adultFilter } from './auth.js';
-import { effectiveAudience, scopeOf, scopeSql } from './audience.js';
+import { adultFilter, adultUnlocked } from './auth.js';
+import { creatorScopeSql, effectiveAudience, scopeOf, scopeSql } from './audience.js';
 
 export const POST_FROM = `FROM posts p
   LEFT JOIN creators c ON c.id = p.creator_id
@@ -59,7 +59,42 @@ export function mediaOf(postIds: number[]): Map<number, any[]> {
 }
 
 /** Full post objects for the feed and post page. */
-export function hydratePosts(rows: any[], userId: number): any[] {
+/**
+ * SQL condition: may creator `c` be shown as a mention target to this request?
+ * Never a deleted creator, and never an 18+ one where 18+ is locked. In a
+ * scope it must also have no 18+ post at all, and be a profile the scope can
+ * open: in general, any such creator mentioned by a post the scope shows
+ * (loadCreator gives it a limited profile); in unknown, a creator not
+ * classified general.
+ */
+export function mentionTargetSql(req: Request, alias = 'c'): string {
+  const scope = scopeOf(req);
+  const parts = [`${alias}.deleted = 0`];
+  if (scope || !adultUnlocked(req)) parts.push(`${alias}.adult = 0`);
+  if (scope) {
+    parts.push(`NOT EXISTS (SELECT 1 FROM posts pa WHERE pa.creator_id = ${alias}.id AND pa.adult = 1)`);
+    if (scope === 'unknown') parts.push(creatorScopeSql(scope, alias));
+  }
+  return parts.join(' AND ');
+}
+
+/** The creators each post mentions that this request may open, as written in the caption. */
+function mentionsOf(postIds: number[], req: Request | undefined): Map<number, { type: 'creator'; handle: string; name: string }[]> {
+  const out = new Map<number, { type: 'creator'; handle: string; name: string }[]>();
+  if (!req || postIds.length === 0) return out;
+  const ph = postIds.map(() => '?').join(',');
+  const rows = db
+    .prepare(`SELECT pm.post_id, pm.name, c.handle FROM post_mentions pm JOIN creators c ON c.id = pm.creator_id WHERE pm.post_id IN (${ph}) AND ${mentionTargetSql(req)} ORDER BY pm.post_id, pm.name`)
+    .all(...postIds) as { post_id: number; name: string; handle: string }[];
+  for (const r of rows) {
+    const list = out.get(r.post_id) ?? [];
+    list.push({ type: 'creator', handle: r.handle, name: r.name });
+    out.set(r.post_id, list);
+  }
+  return out;
+}
+
+export function hydratePosts(rows: any[], userId: number, req?: Request): any[] {
   const ids = rows.map((r) => r.id);
   if (ids.length === 0) return [];
   const ph = ids.map(() => '?').join(',');
@@ -68,6 +103,7 @@ export function hydratePosts(rows: any[], userId: number): any[] {
   const comments = new Map((db.prepare(`SELECT post_id, COUNT(*) n FROM comments WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids) as any[]).map((r) => [r.post_id, r.n]));
   const mine = new Set(db.prepare(`SELECT post_id FROM likes WHERE user_id = ? AND post_id IN (${ph})`).pluck().all(userId, ...ids) as number[]);
   const faves = new Set(db.prepare(`SELECT post_id FROM favorites WHERE user_id = ? AND post_id IN (${ph})`).pluck().all(userId, ...ids) as number[]);
+  const mentions = mentionsOf(ids, req);
   return rows.map((r) => ({
     id: r.id,
     caption: r.caption,
@@ -85,6 +121,8 @@ export function hydratePosts(rows: any[], userId: number): any[] {
     audience: effectiveAudience(r),
     imported_at: r.imported_at,
     meta: parseMeta(r.meta),
+    // Creators the caption mentions (@name) that this request may open.
+    mentions: mentions.get(r.id) ?? [],
   }));
 }
 

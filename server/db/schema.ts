@@ -288,4 +288,19 @@ export const migrations: string[] = [
   CREATE TRIGGER vis_tags_ins AFTER INSERT ON post_hashtags BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
   CREATE TRIGGER vis_tags_del AFTER DELETE ON post_hashtags BEGIN UPDATE visibility_rev SET rev = rev + 1 WHERE id = 1; END;
   `,
+  // Grabbit 3.0.3 (additive): creators a caption mentions (@name), apart from
+  // the post's own creator, and where a creator row came from ('mention' = made
+  // for an @name nobody had; NULL = every older way). A mentioned creator only
+  // finds the post through this table: the post, its files and its author stay
+  // as they are.
+  `
+  ALTER TABLE creators ADD COLUMN origin TEXT;
+  CREATE TABLE post_mentions (
+    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    creator_id INTEGER NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    PRIMARY KEY (post_id, creator_id)
+  );
+  CREATE INDEX post_mentions_creator ON post_mentions(creator_id, post_id);
+  `,
 ];

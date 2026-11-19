@@ -40,6 +40,165 @@ export function setPostHashtags(postId: number, caption: string): void {
   }
 }
 
+// --- Creator mentions (Grabbit 3.0.3) ----------------------------------------
+
+export type Platform = 'instagram' | 'tiktok' | null;
+
+/** The platform a post came from, when its source URL or delivery metadata says so. */
+export function postPlatform(sourceUrl: string | null | undefined, meta?: string | null): Platform {
+  const fromHost = (raw: unknown): Platform => {
+    if (typeof raw !== 'string' || !raw) return null;
+    let host = raw.toLowerCase();
+    try {
+      if (/^https?:\/\//i.test(raw)) host = new URL(raw).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+    const is = (d: string) => host === d || host.endsWith(`.${d}`);
+    if (is('instagram.com') || host === 'instagram') return 'instagram';
+    if (is('tiktok.com') || host === 'tiktok') return 'tiktok';
+    return null;
+  };
+  const p = fromHost(sourceUrl);
+  if (p || !meta) return p;
+  try {
+    const m = JSON.parse(meta);
+    return m && typeof m === 'object' ? fromHost(m.platform) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Account names each platform allows; anything else is not an account there.
+const ACCOUNT_RE: Record<'instagram' | 'tiktok', RegExp> = { instagram: /^[a-z0-9._]{1,30}$/, tiktok: /^[a-z0-9._]{2,24}$/ };
+
+export type MentionPlan =
+  | { name: string; action: 'link'; creatorId: number }
+  | { name: string; action: 'create' }
+  | { name: string; action: 'skip'; reason: 'self' | 'invalid' | 'deleted' | 'other-account' };
+
+/**
+ * What one @name in a post's caption should point at, read-only. An account on
+ * the post's platform is matched first (ig_handle / tiktok_handle), then a
+ * creator handle or alias. A creator already tied to a different account on
+ * that platform is never reused: accounts on different platforms are never
+ * merged by a mention. A deleted creator is never revived.
+ */
+export function planMention(name: string, platform: Platform, authorId: number | null): MentionPlan {
+  const n = name.toLowerCase();
+  if (platform && !ACCOUNT_RE[platform].test(n)) return { name: n, action: 'skip', reason: 'invalid' };
+  const col = platform === 'instagram' ? 'ig_handle' : platform === 'tiktok' ? 'tiktok_handle' : null;
+  let hit = (col ? db.prepare(`SELECT id, ${col} AS acct FROM creators WHERE ${col} = ? COLLATE NOCASE AND deleted = 0 ORDER BY id LIMIT 1`).get(n) : undefined) as
+    | { id: number; acct: string | null }
+    | undefined;
+  if (!hit) {
+    const acct = col ? `c.${col}` : 'NULL';
+    hit = (db.prepare(`SELECT c.id, ${acct} AS acct FROM creators c WHERE c.handle = ? AND c.deleted = 0`).get(n) ??
+      db.prepare(`SELECT c.id, ${acct} AS acct FROM creator_aliases a JOIN creators c ON c.id = a.creator_id WHERE a.alias = ? AND c.deleted = 0`).get(n)) as
+      | { id: number; acct: string | null }
+      | undefined;
+    if (hit && hit.acct && hit.acct.toLowerCase() !== n) return { name: n, action: 'skip', reason: 'other-account' };
+  }
+  if (!hit && !platform) {
+    // Platform unknown: the name may still be a known account on either one.
+    hit = db.prepare('SELECT id, NULL AS acct FROM creators WHERE (ig_handle = ? COLLATE NOCASE OR tiktok_handle = ? COLLATE NOCASE) AND deleted = 0 ORDER BY id LIMIT 1').get(n, n) as
+      | { id: number; acct: null }
+      | undefined;
+  }
+  if (hit) return hit.id === authorId ? { name: n, action: 'skip', reason: 'self' } : { name: n, action: 'link', creatorId: hit.id };
+  if (db.prepare('SELECT 1 FROM creators WHERE handle = ? AND deleted = 1').get(n)) return { name: n, action: 'skip', reason: 'deleted' };
+  if (validateHandle(n) && validateHandle(mentionHandle(n))) return { name: n, action: 'skip', reason: 'invalid' };
+  return { name: n, action: 'create' };
+}
+
+/**
+ * The creator handle for an @name. Most names are valid handles as they are.
+ * One a handle cannot be (it starts with "_" or ".", which Elitogram reserves)
+ * becomes "u-" + the name without those: no Instagram or TikTok account has a
+ * "-", so it can never take a real account's handle. The written name is kept
+ * as an alias and the display name.
+ */
+export function mentionHandle(name: string): string {
+  return validateHandle(name) ? `u-${name.replace(/^[_.]+/, '')}` : name;
+}
+
+/**
+ * A creator for an @name nobody had. It starts unclassified (never general),
+ * not 18+, followed by nobody and with every poller off; origin = 'mention'
+ * keeps it out of the avatar fetch and the creator lists until it owns posts.
+ */
+function createMentionedCreator(name: string, platform: Platform): number {
+  const handle = mentionHandle(name);
+  const res = db
+    .prepare(
+      `INSERT INTO creators (handle, display_name, ig_handle, tiktok_handle, ig_autopoll, tiktok_autopoll, adult, audience, origin, created_at)
+       VALUES (?, ?, ?, ?, 0, 0, 0, 'unknown', 'mention', ?)`,
+    )
+    .run(handle, handle === name ? '' : name, platform === 'instagram' ? name : null, platform === 'tiktok' ? name : null, now());
+  const id = Number(res.lastInsertRowid);
+  if (handle !== name) db.prepare('INSERT INTO creator_aliases (alias, creator_id) VALUES (?, ?)').run(name, id);
+  return id;
+}
+
+export interface MentionResult {
+  linked: number[]; // creator ids now tied to the post
+  created: number[]; // of those, creators made here
+  skipped: { name: string; reason: string }[];
+  changed: boolean; // the post's mention rows changed
+}
+
+/**
+ * Rebuilds a post's mention rows from its caption: one row per mentioned
+ * creator, never the post's own creator. Runs inside the caller's transaction
+ * when there is one. The caption, the post and its files are not touched.
+ */
+export function setPostMentions(postId: number, opts: { create?: boolean } = {}): MentionResult {
+  const create = opts.create ?? true;
+  const out: MentionResult = { linked: [], created: [], skipped: [], changed: false };
+  const p = db.prepare('SELECT caption, creator_id, source_url, meta FROM posts WHERE id = ?').get(postId) as any;
+  if (!p) return out;
+  const platform = postPlatform(p.source_url, p.meta);
+  const want = new Map<number, string>();
+  for (const name of parseMentions(p.caption ?? '')) {
+    const plan = planMention(name, platform, p.creator_id ?? null);
+    if (plan.action === 'skip') {
+      out.skipped.push({ name: plan.name, reason: plan.reason });
+      continue;
+    }
+    if (plan.action === 'create' && !create) continue;
+    const id = plan.action === 'link' ? plan.creatorId : createMentionedCreator(plan.name, platform);
+    if (plan.action === 'create') out.created.push(id);
+    if (!want.has(id)) want.set(id, plan.name);
+  }
+  const have = new Map((db.prepare('SELECT creator_id, name FROM post_mentions WHERE post_id = ?').all(postId) as { creator_id: number; name: string }[]).map((r) => [r.creator_id, r.name]));
+  const del = db.prepare('DELETE FROM post_mentions WHERE post_id = ? AND creator_id = ?');
+  const ins = db.prepare('INSERT INTO post_mentions (post_id, creator_id, name) VALUES (?, ?, ?) ON CONFLICT(post_id, creator_id) DO UPDATE SET name = excluded.name');
+  for (const id of have.keys()) if (!want.has(id)) { del.run(postId, id); out.changed = true; }
+  for (const [id, name] of want) if (have.get(id) !== name) { ins.run(postId, id, name); out.changed = true; }
+  out.linked = [...want.keys()];
+  return out;
+}
+
+/**
+ * setPostMentions in its own savepoint: a mention that cannot be stored is
+ * logged and left out, and never undoes the post, its caption or its edit.
+ */
+export function linkMentionsSafely(postId: number): MentionResult | null {
+  try {
+    return db.transaction(() => setPostMentions(postId))();
+  } catch (err) {
+    console.warn(`Mentions of post ${postId} not stored: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+/** True when the post's hashtag rows differ from what its caption says. */
+export function hashtagsStale(postId: number, caption: string): boolean {
+  const want = parseHashtags(caption).sort();
+  const have = (db.prepare('SELECT h.tag FROM post_hashtags ph JOIN hashtags h ON h.id = ph.hashtag_id WHERE ph.post_id = ?').pluck().all(postId) as string[]).map((t) => t.toLowerCase()).sort();
+  return want.length !== have.length || want.some((t, i) => t !== have[i]);
+}
+
 /** Rebuilds the search row for one post. */
 export function indexPost(postId: number): void {
   const p = db
@@ -194,6 +353,7 @@ export async function createPost(input: CreatePostInput): Promise<CreatePostResu
         insMedia.run(id, i, x.p.sniff.kind, x.p.sniff.mime, mediaRel(x.abs), fs.statSync(x.abs).size, x.meta.width, x.meta.height, x.meta.duration, x.p.sha, hashes[i], t);
       });
       setPostHashtags(id, caption);
+      linkMentionsSafely(id);
       indexPost(id);
       return id;
     })();
@@ -366,4 +526,130 @@ export function createCreator(handle: string, fields: { displayName?: string; ad
     .prepare('INSERT INTO creators (handle, display_name, adult, created_at) VALUES (?, ?, ?, ?)')
     .run(h, fields.displayName ?? '', fields.adult ? 1 : 0, now());
   return Number(res.lastInsertRowid);
+}
+
+// --- Mention and hashtag backfill (Grabbit 3.0.3) ------------------------------
+
+export const BACKFILL_CURSOR_KEY = 'metadata_backfill_after';
+
+export interface BackfillStats {
+  scanned: number;
+  postsWithMentions: number;
+  newRelations: number;
+  removedRelations: number;
+  newCreators: number;
+  reusedCreators: number;
+  skipped: Record<string, number>;
+  postsWithStaleTags: number;
+  newHashtags: number;
+  newTagLinks: number;
+  lastId: number;
+}
+
+export function emptyBackfillStats(): BackfillStats {
+  return { scanned: 0, postsWithMentions: 0, newRelations: 0, removedRelations: 0, newCreators: 0, reusedCreators: 0, skipped: {}, postsWithStaleTags: 0, newHashtags: 0, newTagLinks: 0, lastId: 0 };
+}
+
+/**
+ * One batch of the backfill: the next `limit` live posts after `afterId`, by id.
+ * Dry run (apply = false) reads only and counts what applying would write;
+ * `seen` carries names, tags and creators across batches so nothing is counted
+ * twice. Apply writes one transaction per batch: mention rows, creators for
+ * new @names and hashtag rows. Captions, posts and files are never changed.
+ * Returns the number of posts read (0 = done).
+ */
+export function metadataBackfillBatch(
+  afterId: number,
+  limit: number,
+  apply: boolean,
+  stats: BackfillStats,
+  seen: { names: Set<string>; tags: Set<string>; reused: Set<number> },
+): number {
+  const rows = db
+    .prepare('SELECT id, caption, creator_id, source_url, meta FROM posts WHERE id > ? AND deleted = 0 ORDER BY id LIMIT ?')
+    .all(afterId, limit) as { id: number; caption: string; creator_id: number | null; source_url: string | null; meta: string | null }[];
+  if (rows.length === 0) return 0;
+  const tagKnown = db.prepare('SELECT 1 FROM hashtags WHERE tag = ?');
+  const tagLinked = db.prepare('SELECT 1 FROM post_hashtags ph JOIN hashtags h ON h.id = ph.hashtag_id WHERE ph.post_id = ? AND h.tag = ?');
+  const haveRows = db.prepare('SELECT creator_id FROM post_mentions WHERE post_id = ?').pluck();
+  const work = () => {
+    for (const p of rows) {
+      stats.scanned++;
+      stats.lastId = p.id;
+      const caption = p.caption ?? '';
+      // Hashtags: only a post whose rows differ from its caption is rewritten.
+      const tags = parseHashtags(caption);
+      const tagsChanged = hashtagsStale(p.id, caption);
+      if (tagsChanged) {
+        stats.postsWithStaleTags++;
+        for (const t of tags) {
+          if (!tagKnown.get(t) && !seen.tags.has(t)) {
+            seen.tags.add(t);
+            stats.newHashtags++;
+          }
+          if (!tagLinked.get(p.id, t)) stats.newTagLinks++;
+        }
+        if (apply) {
+          setPostHashtags(p.id, caption);
+          // Tags are part of the post's search row.
+          indexPost(p.id);
+        }
+      }
+      // Mentions.
+      const names = parseMentions(caption);
+      if (names.length === 0 && (haveRows.all(p.id) as number[]).length === 0) continue;
+      if (names.length) stats.postsWithMentions++;
+      const have = new Set(haveRows.all(p.id) as number[]);
+      if (apply) {
+        const r = linkMentionsSafely(p.id);
+        if (!r) {
+          stats.skipped.error = (stats.skipped.error ?? 0) + 1;
+          continue;
+        }
+        stats.newCreators += r.created.length;
+        // A creator made in this run is never counted as reused by a later post.
+        for (const id of r.created) seen.reused.add(id);
+        for (const id of r.linked) {
+          if (!have.has(id)) stats.newRelations++;
+          if (!seen.reused.has(id)) {
+            seen.reused.add(id);
+            stats.reusedCreators++;
+          }
+        }
+        for (const id of have) if (!r.linked.includes(id)) stats.removedRelations++;
+        for (const s of r.skipped) stats.skipped[s.reason] = (stats.skipped[s.reason] ?? 0) + 1;
+      } else {
+        const platform = postPlatform(p.source_url, p.meta);
+        const want = new Set<string>();
+        for (const name of names) {
+          const plan = planMention(name, platform, p.creator_id);
+          if (plan.action === 'skip') {
+            stats.skipped[plan.reason] = (stats.skipped[plan.reason] ?? 0) + 1;
+            continue;
+          }
+          if (plan.action === 'create') {
+            // Every later post naming it links to the creator made for the first one.
+            if (!seen.names.has(plan.name)) {
+              seen.names.add(plan.name);
+              stats.newCreators++;
+            }
+            if (!want.has(`n:${plan.name}`)) stats.newRelations++;
+            want.add(`n:${plan.name}`);
+            continue;
+          }
+          if (want.has(`c:${plan.creatorId}`)) continue;
+          want.add(`c:${plan.creatorId}`);
+          if (!have.has(plan.creatorId)) stats.newRelations++;
+          if (!seen.reused.has(plan.creatorId)) {
+            seen.reused.add(plan.creatorId);
+            stats.reusedCreators++;
+          }
+        }
+        for (const id of have) if (!want.has(`c:${id}`)) stats.removedRelations++;
+      }
+    }
+  };
+  if (apply) db.transaction(work)();
+  else work();
+  return rows.length;
 }

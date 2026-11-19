@@ -3,7 +3,7 @@ import { db, now } from '../db/index.js';
 import { adultUnlocked, can, requirePerm } from '../auth.js';
 import { ah, HttpError, str } from '../http.js';
 import { creatorScopeSql, parseClassify, refuseScoped, scopeOf, scopeSql } from '../audience.js';
-import { parseCursor, cursorSql, nextCursor, gridTiles, POST_FROM, visible } from '../views.js';
+import { parseCursor, cursorSql, nextCursor, gridTiles, mentionTargetSql, POST_FROM, visible } from '../views.js';
 import { parseUpload } from '../media/upload.js';
 import { APP_DIRS, isReservedName, mediaRel, placeFile, sniffFile, validateHandle } from '../media/files.js';
 import { createCreator, findCreatorByName, MediaRejected, moveMediaToAuthor, reindexCreator, returnMediaHome, withMoveLock } from '../library.js';
@@ -16,7 +16,19 @@ function loadCreator(req: Request, handle: string): any {
   if (!c) throw new HttpError(404, 'Profile not found');
   if (c.adult && !adultUnlocked(req)) throw new HttpError(404, 'Profile not found');
   const scope = scopeOf(req);
-  if (scope && !db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${creatorScopeSql(scope)}`).get(c.id)) throw new HttpError(404, 'Profile not found');
+  if (scope && !db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${creatorScopeSql(scope)}`).get(c.id)) {
+    // General only: a creator nobody classified general opens as a limited
+    // profile when a post the scope shows mentions it, and it has no 18+ post.
+    // The limited profile names the handle and nothing else the creator owns
+    // (no bio, links, aliases or picture), and lists only posts of the scope.
+    const reachable =
+      scope === 'general' &&
+      db
+        .prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${mentionTargetSql(req)} AND EXISTS (SELECT 1 FROM post_mentions pm JOIN posts p ON p.id = pm.post_id LEFT JOIN creators c ON c.id = p.creator_id LEFT JOIN users u ON u.id = p.user_id WHERE pm.creator_id = ? AND ${visible(req)})`)
+        .get(c.id, c.id);
+    if (!reachable) throw new HttpError(404, 'Profile not found');
+    c.limited = true;
+  }
   return c;
 }
 
@@ -24,6 +36,38 @@ function creatorJson(req: Request, c: any) {
   const counts = db
     .prepare(`SELECT COUNT(*) AS posts FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.creator_id = ? AND ${visible(req)}`)
     .get(c.id) as any;
+  const mentioned = db
+    .prepare(`SELECT COUNT(*) FROM post_mentions pm ${POST_FROM.replace('FROM posts p', 'JOIN posts p ON p.id = pm.post_id')} WHERE pm.creator_id = ? AND ${visible(req)}`)
+    .pluck()
+    .get(c.id) as number;
+  if (c.limited) {
+    return {
+      id: c.id,
+      handle: c.handle,
+      // A creator made for an @name may carry that name as written, and nothing else.
+      display_name: c.origin === 'mention' ? c.display_name : '',
+      bio: '',
+      links: [],
+      aliases: [],
+      avatar: `/m/ca/${c.id}`,
+      banner: `/m/cb/${c.id}`,
+      has_avatar: false,
+      has_banner: false,
+      adult: false,
+      // The lane it is shown in; the creator itself stays unclassified.
+      audience: 'general',
+      limited: true,
+      post_count: counts.posts,
+      mentioned_count: mentioned,
+      follower_count: db.prepare('SELECT COUNT(*) FROM follows WHERE creator_id = ?').pluck().get(c.id),
+      following: !!db.prepare('SELECT 1 FROM follows WHERE creator_id = ? AND user_id = ?').get(c.id, req.user!.id),
+      ig_handle: null,
+      tiktok_handle: null,
+      ig_autopoll: false,
+      tiktok_autopoll: false,
+      can_manage: false,
+    };
+  }
   const aliases = db.prepare('SELECT alias FROM creator_aliases WHERE creator_id = ? ORDER BY alias').pluck().all(c.id);
   const followers = db.prepare('SELECT COUNT(*) FROM follows WHERE creator_id = ?').pluck().get(c.id);
   const following = !!db.prepare('SELECT 1 FROM follows WHERE creator_id = ? AND user_id = ?').get(c.id, req.user!.id);
@@ -48,6 +92,8 @@ function creatorJson(req: Request, c: any) {
     adult: !!c.adult,
     audience: c.adult ? 'adult' : c.audience === 'general' ? 'general' : 'unknown',
     post_count: counts.posts,
+    mentioned_count: mentioned,
+    origin: c.origin ?? null,
     follower_count: followers,
     following,
     ig_handle: c.ig_handle,
@@ -69,6 +115,9 @@ creators.get('/creators', (req, res) => {
   const scope = scopeOf(req);
   // Scoped counts include only posts the scope can see (the derived table joins its own creators row).
   const scopePost = scope ? `AND ${scopeSql(scope)}` : '';
+  // A creator made for an @name owns nothing to browse or classify until it
+  // has posts of its own; it is listed only when searched for.
+  const mentionOnly = q ? '' : "AND NOT (c.origin = 'mention' AND NOT EXISTS (SELECT 1 FROM posts po WHERE po.creator_id = c.id))";
   const filter = q ? "AND (c.handle LIKE ? OR c.display_name LIKE ? OR EXISTS (SELECT 1 FROM creator_aliases a WHERE a.creator_id = c.id AND a.alias LIKE ?))" : '';
   const args = q ? [`%${q}%`, `%${q}%`, `%${q}%`] : [];
   const rows = db
@@ -77,7 +126,7 @@ creators.get('/creators', (req, res) => {
        FROM creators c
        LEFT JOIN (SELECT p.creator_id, COUNT(*) AS n, MAX(p.created_at) AS latest FROM posts p LEFT JOIN creators c ON c.id = p.creator_id
                   WHERE p.deleted = 0 ${adultPost} ${scopePost} GROUP BY p.creator_id) pc ON pc.creator_id = c.id
-       WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scope)} ${filter}
+       WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scope)} ${filter} ${mentionOnly}
        ORDER BY (COALESCE(pc.n, 0) > 0) DESC, pc.latest DESC, c.handle
        LIMIT ${limit} OFFSET ${offset}`,
     )
@@ -246,6 +295,22 @@ creators.get('/creators/:handle/posts', (req, res) => {
   const rows = db
     .prepare(`SELECT p.id, p.created_at ${POST_FROM} WHERE p.creator_id = ? AND ${visible(req)} AND ${cur.sql} ORDER BY p.created_at DESC, p.id DESC LIMIT ${limit}`)
     .all(c.id, ...cur.args) as any[];
+  res.json({ items: gridTiles(rows), next: nextCursor(rows, limit) });
+});
+
+// Posts of other authors whose caption mentions this creator (Grabbit 3.0.3).
+// Same files, same posts: only the post_mentions row ties them here.
+creators.get('/creators/:handle/mentioned', (req, res) => {
+  const c = loadCreator(req, req.params.handle);
+  const cur = cursorSql(parseCursor(req.query.cursor));
+  const limit = 36;
+  const rows = db
+    .prepare(
+      `SELECT p.id, p.created_at FROM post_mentions pm ${POST_FROM.replace('FROM posts p', 'JOIN posts p ON p.id = pm.post_id')}
+       WHERE pm.creator_id = ? AND (p.creator_id IS NULL OR p.creator_id <> ?) AND ${visible(req)} AND ${cur.sql}
+       ORDER BY p.created_at DESC, p.id DESC LIMIT ${limit}`,
+    )
+    .all(c.id, c.id, ...cur.args) as any[];
   res.json({ items: gridTiles(rows), next: nextCursor(rows, limit) });
 });
 
@@ -423,6 +488,10 @@ creators.post(
           db.prepare('INSERT OR IGNORE INTO creator_aliases (alias, creator_id) VALUES (?, ?)').run(from.handle, into.id);
           db.prepare('INSERT OR IGNORE INTO follows (user_id, creator_id, created_at) SELECT user_id, ?, created_at FROM follows WHERE creator_id = ?').run(into.id, from.id);
           db.prepare('DELETE FROM follows WHERE creator_id = ?').run(from.id);
+          // Mentions follow the merge; a post of the merged profile no longer mentions its own creator.
+          db.prepare('INSERT OR IGNORE INTO post_mentions (post_id, creator_id, name) SELECT post_id, ?, name FROM post_mentions WHERE creator_id = ?').run(into.id, from.id);
+          db.prepare('DELETE FROM post_mentions WHERE creator_id = ?').run(from.id);
+          db.prepare('DELETE FROM post_mentions WHERE creator_id = ? AND post_id IN (SELECT id FROM posts WHERE creator_id = ?)').run(into.id, into.id);
           db.prepare(
             `UPDATE creators SET
                ig_handle = COALESCE(ig_handle, ?), tiktok_handle = COALESCE(tiktok_handle, ?),

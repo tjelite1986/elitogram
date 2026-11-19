@@ -7,7 +7,7 @@ import { config } from '../config.js';
 import { db, now } from '../db/index.js';
 import { APP_DIRS, mediaAbs, mediaIdentity, mediaRel, uniqueTarget } from '../media/files.js';
 import { dHash } from '../media/probe.js';
-import { indexPost } from '../library.js';
+import { BACKFILL_CURSOR_KEY, emptyBackfillStats, indexPost, metadataBackfillBatch } from '../library.js';
 import { cookieFor } from '../sync/cookies.js';
 import { runProc } from '../sync/runner.js';
 import { downloaderVersions } from '../sync/sources.js';
@@ -258,7 +258,7 @@ export async function squareAvatar(srcAbs: string, prefix: string): Promise<stri
 
 /** Fills missing creator avatars: Instagram profile picture when a cookie is set, otherwise the newest image post that is not 18+. */
 export async function runAvatarBackfill(ctx: JobContext): Promise<string> {
-  const list = db.prepare('SELECT id, handle, ig_handle FROM creators WHERE deleted = 0 AND avatar_path IS NULL LIMIT 200').all() as any[];
+  const list = db.prepare(`SELECT id, handle, ig_handle FROM creators WHERE deleted = 0 AND avatar_path IS NULL AND origin IS NOT 'mention' LIMIT 200`).all() as any[];
   let fromIg = 0;
   let fromPost = 0;
   let igTries = 0;
@@ -309,4 +309,41 @@ export async function runDownloaderUpdate(ctx: JobContext): Promise<string> {
   const v = await downloaderVersions();
   ctx.log(r.stdout.trim().split('\n').pop() ?? '');
   return `yt-dlp ${v.ytDlp}, gallery-dl ${v.galleryDl}`;
+}
+
+// --- Mentions and hashtags backfill (Grabbit 3.0.3) ------------------------------
+
+const BACKFILL_BATCH = 200;
+const BACKFILL_PAUSE_MS = 150;
+
+/**
+ * Links @mentions and #hashtags in the captions already in the library, in
+ * batches of 200 posts with a pause between them so the Pi stays responsive.
+ * Resumable: the last post id done is kept in settings, and a stopped or
+ * failed run continues from there. Captions, posts and files are never changed.
+ */
+export async function runMetadataBackfill(ctx: JobContext): Promise<string> {
+  const get = db.prepare('SELECT value FROM settings WHERE key = ?').pluck();
+  const put = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+  let after = Number(get.get(BACKFILL_CURSOR_KEY) ?? 0) || 0;
+  const total = db.prepare('SELECT COUNT(*) FROM posts WHERE deleted = 0').pluck().get() as number;
+  const startDone = db.prepare('SELECT COUNT(*) FROM posts WHERE deleted = 0 AND id <= ?').pluck().get(after) as number;
+  const stats = emptyBackfillStats();
+  const seen = { names: new Set<string>(), tags: new Set<string>(), reused: new Set<number>() };
+  if (after) ctx.log(`Resuming after post ${after} (${startDone} of ${total} done)`);
+  let batches = 0;
+  for (;;) {
+    if (ctx.stopped()) {
+      ctx.log(`Stopped after post ${after}`);
+      break;
+    }
+    const n = metadataBackfillBatch(after, BACKFILL_BATCH, true, stats, seen);
+    if (n === 0) break;
+    after = stats.lastId;
+    put.run(BACKFILL_CURSOR_KEY, String(after));
+    if (++batches % 10 === 0) ctx.log(`${startDone + stats.scanned} of ${total} posts (${Math.round(((startDone + stats.scanned) / Math.max(total, 1)) * 100)}%)`);
+    await sleep(BACKFILL_PAUSE_MS, ctx);
+  }
+  const skipped = Object.entries(stats.skipped).map(([k, v]) => `${k} ${v}`).join(', ') || 'none';
+  return `${stats.scanned} posts read; ${stats.newCreators} creators made, ${stats.newRelations} mention links added, ${stats.removedRelations} removed; ${stats.postsWithStaleTags} posts retagged (${stats.newHashtags} new hashtags); skipped: ${skipped}`;
 }
