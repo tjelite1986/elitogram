@@ -147,7 +147,14 @@ export async function moveFile(src: string, dest: string): Promise<void> {
     const tmp = path.join(path.dirname(dest), `.${path.basename(dest)}.part-${crypto.randomBytes(6).toString('hex')}`);
     try {
       await fsp.copyFile(src, tmp, fs.constants.COPYFILE_EXCL);
-      await fsp.link(tmp, dest);
+      try {
+        await fsp.link(tmp, dest);
+      } catch (linkErr: any) {
+        if (linkErr.code !== 'EPERM' && linkErr.code !== 'ENOTSUP') throw linkErr;
+        // A file system without hard links: an exclusive copy. On failure `dest`
+        // is left alone, since this call cannot tell whether it created it.
+        await fsp.copyFile(tmp, dest, fs.constants.COPYFILE_EXCL);
+      }
     } finally {
       await fsp.unlink(tmp).catch(() => undefined);
     }

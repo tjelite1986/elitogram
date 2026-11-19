@@ -406,34 +406,40 @@ creators.post(
       const moved: number[] = [];
       try {
         await moveMediaToAuthor(postIds, { creatorId: into.id }, moved);
+        db.transaction(() => {
+          // A profile may have been deleted while the files moved (deletes do not
+          // take the move lock): then nothing is written.
+          for (const c of [from, into]) {
+            const now_ = db.prepare('SELECT handle, deleted FROM creators WHERE id = ?').get(c.id) as { handle: string; deleted: number } | undefined;
+            if (!now_ || now_.deleted || now_.handle !== c.handle) throw new HttpError(409, `${c.handle} changed meanwhile; reload and try again`);
+          }
+          // The source is read again here: it may have been classified (18+ or
+          // general) while the files were moving, and the merged profile must carry
+          // its current classification, not the snapshot taken before the move.
+          const cur = db.prepare('SELECT * FROM creators WHERE id = ?').get(from.id) as any;
+          if (cur) Object.assign(from, cur);
+          db.prepare('UPDATE posts SET creator_id = ? WHERE creator_id = ?').run(into.id, from.id);
+          db.prepare('UPDATE creator_aliases SET creator_id = ? WHERE creator_id = ?').run(into.id, from.id);
+          db.prepare('INSERT OR IGNORE INTO creator_aliases (alias, creator_id) VALUES (?, ?)').run(from.handle, into.id);
+          db.prepare('INSERT OR IGNORE INTO follows (user_id, creator_id, created_at) SELECT user_id, ?, created_at FROM follows WHERE creator_id = ?').run(into.id, from.id);
+          db.prepare('DELETE FROM follows WHERE creator_id = ?').run(from.id);
+          db.prepare(
+            `UPDATE creators SET
+               ig_handle = COALESCE(ig_handle, ?), tiktok_handle = COALESCE(tiktok_handle, ?),
+               avatar_source = CASE WHEN avatar_path IS NULL THEN ? ELSE avatar_source END, banner_source = CASE WHEN banner_path IS NULL THEN ? ELSE banner_source END,
+               avatar_path = COALESCE(avatar_path, ?), banner_path = COALESCE(banner_path, ?),
+               bio = CASE WHEN bio = '' THEN ? ELSE bio END, adult = MAX(adult, ?),
+               audience = CASE WHEN audience = 'general' OR ? = 'general' THEN 'general' ELSE audience END
+             WHERE id = ?`,
+          ).run(from.ig_handle, from.tiktok_handle, from.avatar_source, from.banner_source, from.avatar_path, from.banner_path, from.bio, from.adult, from.audience, into.id);
+          // The emptied profile keeps its row (soft-deleted), but its handle is freed to live on as an alias.
+          db.prepare("UPDATE creators SET deleted = 1, ig_autopoll = 0, tiktok_autopoll = 0, handle = handle || '~merged' || id WHERE id = ?").run(from.id);
+        })();
       } catch (err) {
         // The merge wrote nothing: the files go back to their posts' authors.
         await returnMediaHome(moved);
         throw err;
       }
-      db.transaction(() => {
-        // The source is read again here: it may have been classified (18+ or
-        // general) while the files were moving, and the merged profile must carry
-        // its current classification, not the snapshot taken before the move.
-        const cur = db.prepare('SELECT * FROM creators WHERE id = ?').get(from.id) as any;
-        if (cur) Object.assign(from, cur);
-        db.prepare('UPDATE posts SET creator_id = ? WHERE creator_id = ?').run(into.id, from.id);
-        db.prepare('UPDATE creator_aliases SET creator_id = ? WHERE creator_id = ?').run(into.id, from.id);
-        db.prepare('INSERT OR IGNORE INTO creator_aliases (alias, creator_id) VALUES (?, ?)').run(from.handle, into.id);
-        db.prepare('INSERT OR IGNORE INTO follows (user_id, creator_id, created_at) SELECT user_id, ?, created_at FROM follows WHERE creator_id = ?').run(into.id, from.id);
-        db.prepare('DELETE FROM follows WHERE creator_id = ?').run(from.id);
-        db.prepare(
-          `UPDATE creators SET
-             ig_handle = COALESCE(ig_handle, ?), tiktok_handle = COALESCE(tiktok_handle, ?),
-             avatar_source = CASE WHEN avatar_path IS NULL THEN ? ELSE avatar_source END, banner_source = CASE WHEN banner_path IS NULL THEN ? ELSE banner_source END,
-             avatar_path = COALESCE(avatar_path, ?), banner_path = COALESCE(banner_path, ?),
-             bio = CASE WHEN bio = '' THEN ? ELSE bio END, adult = MAX(adult, ?),
-             audience = CASE WHEN audience = 'general' OR ? = 'general' THEN 'general' ELSE audience END
-           WHERE id = ?`,
-        ).run(from.ig_handle, from.tiktok_handle, from.avatar_source, from.banner_source, from.avatar_path, from.banner_path, from.bio, from.adult, from.audience, into.id);
-        // The emptied profile keeps its row (soft-deleted), but its handle is freed to live on as an alias.
-        db.prepare("UPDATE creators SET deleted = 1, ig_autopoll = 0, tiktok_autopoll = 0, handle = handle || '~merged' || id WHERE id = ?").run(from.id);
-      })();
     });
     reindexCreator(into.id);
     for (const uid of db.prepare('SELECT user_id FROM follows WHERE creator_id = ?').pluck().all(into.id) as number[]) {

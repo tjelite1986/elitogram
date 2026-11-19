@@ -278,7 +278,14 @@ async function moveOneMedia(m: { id: number; path: string }, dirRel: string): Pr
   const ext = m.path.match(/\.[^./]+$/)?.[0] ?? '';
   const dest = await placeFile(src, dirRel, m.path.split('/').pop() ?? 'file', ext);
   try {
-    upd.run(mediaRel(dest), m.id);
+    // Only the row as it was read: a purge may have removed it meanwhile.
+    if (db.prepare('UPDATE media SET path = ? WHERE id = ? AND path = ?').run(mediaRel(dest), m.id, m.path).changes === 0) {
+      const still = db.prepare('SELECT 1 FROM media WHERE id = ?').get(m.id);
+      // A purged row's bytes go too (this call created `dest`); otherwise keep the file and say where it is.
+      if (!still) await fsp.unlink(dest).catch(() => undefined);
+      else console.error(`Media ${m.id}: its row changed while its file moved to ${dest}`);
+      return false;
+    }
   } catch (err) {
     // Back to its old name if that is still free, otherwise to a free name
     // beside it; the row follows the file either way.
