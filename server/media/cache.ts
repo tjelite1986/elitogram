@@ -26,6 +26,8 @@ const NAME = /^m(\d+)(?:-([0-9a-f]{12}))?_(\d+)\.webp$/;
 const TMP = /\.webp\.\d+\.tmp$/;
 const TMP_AGE_MS = 60 * 60 * 1000;
 export const REBUILD_LIMIT = 100;
+// At most this many files go per clean call; the owner runs it again for more.
+export const CLEAN_LIMIT = 100;
 const REBUILD_WIDTH = 480;
 
 type Kind = 'current' | 'legacy' | 'stale' | 'partial' | 'other';
@@ -50,6 +52,9 @@ async function walk(): Promise<Entry[]> {
   const root = mediaAbs(APP_DIRS.thumbs);
   const ids = identities();
   const out: Entry[] = [];
+  // The cache must be a real folder of this app's: a symlinked _thumbs would
+  // point the cleaner at someone else's files.
+  if (!realDir(root)) return out;
   let shards: fs.Dirent[];
   try {
     shards = await fsp.readdir(root, { withFileTypes: true });
@@ -94,6 +99,26 @@ async function walk(): Promise<Entry[]> {
   const current = new Set(out.filter((e) => e.kind === 'current').map((e) => `${e.id}_${e.width}`));
   for (const e of out) if (e.kind === 'legacy' && current.has(`${e.id}_${e.width}`)) e.duplicate = true;
   return out;
+}
+
+function realDir(abs: string): boolean {
+  try {
+    return fs.lstatSync(abs).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// Read again just before a delete: a stale thumbnail whose id was reused by a
+// row with the same identity in the meantime is current again and stays.
+const identityOf = db.prepare('SELECT id, sha256, path, created_at FROM media WHERE id = ?');
+function stillRemovable(e: Entry): boolean {
+  const abs = mediaAbs(e.rel);
+  if (!realDir(mediaAbs(APP_DIRS.thumbs)) || !realDir(path.dirname(abs))) return false;
+  if (e.kind !== 'stale') return true;
+  const m = NAME.exec(path.basename(e.rel));
+  const row = m ? (identityOf.get(Number(m[1])) as any) : null;
+  return !(row && m && mediaIdentity(row) === `${m[1]}-${m[2]}`);
 }
 
 const removable = (e: Entry) => e.kind === 'legacy' || e.kind === 'stale' || e.kind === 'partial';
@@ -151,11 +176,19 @@ async function exclusive<T>(fn: () => Promise<T>): Promise<T> {
 export function cacheClean(dryRun: boolean) {
   return exclusive(async () => {
     const list = (await walk()).filter(removable);
-    if (dryRun) return { dryRun: true, files: list.length, bytes: sum(list), duplicates: list.filter((e) => e.duplicate).length };
+    const batch = list.slice(0, CLEAN_LIMIT);
+    if (dryRun) {
+      return { dryRun: true, files: list.length, bytes: sum(list), duplicates: list.filter((e) => e.duplicate).length, limit: CLEAN_LIMIT, nextBatch: { files: batch.length, bytes: sum(batch) } };
+    }
     let files = 0;
     let bytes = 0;
+    let skipped = 0;
     const errors: string[] = [];
-    for (const e of list) {
+    for (const e of batch) {
+      if (!stillRemovable(e)) {
+        skipped++;
+        continue;
+      }
       try {
         await fsp.unlink(mediaAbs(e.rel));
         files++;
@@ -167,7 +200,7 @@ export function cacheClean(dryRun: boolean) {
     // Shard folders stay, even empty: a thumbnail() that just made one would
     // otherwise lose it before its write.
     console.log(`[dedupe] cache clean: removed ${files} unused thumbnails (${bytes} bytes)`);
-    return { dryRun: false, files, bytes, errors };
+    return { dryRun: false, files, bytes, skipped, errors, remaining: Math.max(0, list.length - files - skipped) };
   });
 }
 

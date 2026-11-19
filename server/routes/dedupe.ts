@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { Router, type NextFunction, type Request, type Response } from 'express';
+import express, { Router, type NextFunction, type Request, type Response } from 'express';
 import { db } from '../db/index.js';
 import { effectiveAudience } from '../audience.js';
 import { ah } from '../http.js';
@@ -23,7 +23,7 @@ import { cacheClean, cacheRebuild, cacheStatus } from '../media/cache.js';
  * app, and a duplicate post is removed in Elitogram's own UI.
  *
  * Machine to machine only: X-Grabbit-Dedupe-Token must match the secret in
- * GRABBIT_DEDUPE_TOKEN_FILE (or GRABBIT_DEDUPE_TOKEN), at least 32 characters.
+ * GRABBIT_DEDUPE_TOKEN_FILE (the only source), at least 32 characters.
  * Unset means every route refuses. Mounted before the session and origin
  * checks, so a browser cookie never reaches these routes and never helps.
  */
@@ -32,9 +32,11 @@ export const dedupe = Router();
 let cached: { at: number; value: string | null } | null = null;
 function expectedToken(): string | null {
   if (cached && Date.now() - cached.at < 60_000) return cached.value;
-  let value: string | null = process.env.GRABBIT_DEDUPE_TOKEN || null;
+  // The mounted file is the only source, the same one Grabbit reads; a missing
+  // or unreadable file switches the routes off.
+  let value: string | null = null;
   const file = process.env.GRABBIT_DEDUPE_TOKEN_FILE;
-  if (!value && file) {
+  if (file) {
     try {
       value = fs.readFileSync(file, 'utf8').trim() || null;
     } catch {
@@ -60,6 +62,17 @@ dedupe.use((req: Request, res: Response, next: NextFunction) => {
     return;
   }
   next();
+});
+
+// The body is parsed only after the token matched, and a bad body gets a 4xx
+// here (the app's own error handler sits after the session middleware).
+dedupe.use(express.json({ limit: '1mb' }));
+dedupe.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  if (err && typeof err.status === 'number' && err.status >= 400 && err.status < 500) {
+    res.status(err.status).json({ error: err.type === 'entity.parse.failed' ? 'Invalid JSON' : 'Bad request body' });
+    return;
+  }
+  next(err);
 });
 
 const dryRunOf = (req: Request) => req.body?.dryRun !== false;
