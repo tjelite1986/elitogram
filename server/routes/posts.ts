@@ -426,6 +426,9 @@ posts.patch(
     // overwrites a newer classification.
     const destId = author?.creatorId ?? null;
     const before = editState(id, destId, req.user!.id);
+    // An over-long caption is refused, never cut: a cut would silently drop the
+    // end (the #tags) of a caption the caller sent whole.
+    if (typeof body.caption === 'string' && body.caption.length > 5000) throw new HttpError(400, 'Caption is longer than 5000 characters');
     const caption = typeof body.caption === 'string' ? str(body.caption) : null;
     // Media ids this request moved to a holder post (client ids of other posts never count).
     const removed: number[] = [];

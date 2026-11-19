@@ -309,8 +309,17 @@ async function main(): Promise<void> {
     check('the binding moved on after edit + revert', b14b.rev !== b14.rev, `${b14.rev} -> ${b14b.rev}`);
     const r14 = await admin.call('PATCH', `/api/posts/${p11}`, null, { author: b14 });
     check('a bound move at the pre-edit binding answers 409', r14.status === 409, `${r14.status} ${JSON.stringify(r14.json)}`);
+    // R11-01: a display-name edit also moves the binding on.
+    check('display name edit', (await admin.call('PATCH', `/api/creators/${F[2]}`, null, { display_name: `dn-${tag}` })).status === 200);
+    const b14c = await bound(F[2]);
+    check('a display-name edit moves the binding on', b14c.rev !== b14b.rev, `${b14b.rev} -> ${b14c.rev}`);
+    const r14c = await admin.call('PATCH', `/api/posts/${p11}`, null, { author: b14b });
+    check('a bound move from before the display-name edit answers 409', r14c.status === 409, `${r14c.status}`);
+    // R11-02: an over-long caption is refused whole, not cut.
+    const long = await admin.call('PATCH', `/api/posts/${p11}`, null, { caption: 'x'.repeat(5001) });
+    check('a 5001-character caption answers 400', long.status === 400, `${long.status}`);
     const idr = await admin.get(`/api/creator-identities?h=${F[2]}`);
-    check('creator-identities returns the same binding', idr.json?.revs?.[F[2]] === b14b.rev, JSON.stringify(idr.json?.revs));
+    check('creator-identities returns the same binding', idr.json?.revs?.[F[2]] === b14c.rev, JSON.stringify(idr.json?.revs));
 
     // --- R10-02: a limited destination loses its last mention during the move --
     check('classify G general', (await admin.call('POST', '/api/creators-classify', null, { audience: 'general', handles: [G] })).status === 200);

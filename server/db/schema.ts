@@ -304,14 +304,15 @@ export const migrations: string[] = [
   CREATE INDEX post_mentions_creator ON post_mentions(creator_id, post_id);
   `,
   // Grabbit 3.0.4 (additive): a per-creator identity sequence. Every change to
-  // what a creator is judged on (handle, deletion, classification, origin, sync
-  // handles, links, aliases) raises it, and it never goes back, so an edit and
+  // what a creator is judged on (handle, display name (a limited identity
+  // answer rests on it), deletion, classification, origin, sync handles,
+  // links, aliases) raises it, and it never goes back, so an edit and
   // its revert never recreate an earlier value. Grabbit's gateway binds a post
   // move to the value it checked. Triggers keep it current for every writer,
   // including older code after a rollback (which ignores the column).
   `
   ALTER TABLE creators ADD COLUMN ident_seq INTEGER NOT NULL DEFAULT 0;
-  CREATE TRIGGER ident_creator_upd AFTER UPDATE OF handle, deleted, adult, audience, origin, ig_handle, tiktok_handle, links ON creators
+  CREATE TRIGGER ident_creator_upd AFTER UPDATE OF handle, display_name, deleted, adult, audience, origin, ig_handle, tiktok_handle, links ON creators
     BEGIN UPDATE creators SET ident_seq = ident_seq + 1 WHERE id = NEW.id; END;
   CREATE TRIGGER ident_alias_ins AFTER INSERT ON creator_aliases
     BEGIN UPDATE creators SET ident_seq = ident_seq + 1 WHERE id = NEW.creator_id; END;
