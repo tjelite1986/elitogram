@@ -299,10 +299,15 @@ creators.post('/creators-classify', requirePerm('profiles'), (req, res) => {
   const scoped = !!scopeOf(req);
   const updated: string[] = [];
   const skipped: { handle: string; reason: string }[] = [];
+  // In a scope, a creator made for an @name that the scope shows no post of
+  // does not exist there (mentionOriginVisibleSql): naming it, by handle or by
+  // an alias, answers "not found" like an unused name and changes nothing.
+  const visibleHere = db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${mentionOriginVisibleSql(req)}`);
   db.transaction(() => {
     for (const h of handles) {
       const hit = findCreatorByName(h);
-      const c = hit ? (db.prepare('SELECT id, handle, adult, audience FROM creators WHERE id = ? AND deleted = 0').get(hit.id) as any) : undefined;
+      const found = hit ? (db.prepare('SELECT id, handle, adult, audience FROM creators WHERE id = ? AND deleted = 0').get(hit.id) as any) : undefined;
+      const c = found && (!scoped || visibleHere.get(found.id)) ? found : undefined;
       if (!c || (c.adult && scoped)) {
         skipped.push({ handle: h, reason: 'not found' });
         continue;
