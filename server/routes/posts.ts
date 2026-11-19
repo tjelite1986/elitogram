@@ -202,12 +202,13 @@ posts.get('/hashtags/:tag', (req, res) => {
 });
 
 posts.get('/mentions', (req, res) => {
-  const q = str(req.query.q, 60).toLowerCase().replace(/[%_\\]/g, '');
-  const users = db.prepare("SELECT 'user' AS type, id, username AS handle, display_name AS name FROM users WHERE disabled = 0 AND username LIKE ? LIMIT 5").all(`${q}%`) as any[];
+  const q = str(req.query.q, 60).toLowerCase();
+  const like = `${q.replace(/[%_\\]/g, (m) => '\\' + m)}%`;
+  const users = db.prepare("SELECT 'user' AS type, id, username AS handle, display_name AS name FROM users WHERE disabled = 0 AND username LIKE ? ESCAPE '\\' LIMIT 5").all(like) as any[];
   const adult = adultUnlocked(req) ? '' : 'AND c.adult = 0';
   const creators = db
-    .prepare(`SELECT 'creator' AS type, c.id, c.handle, c.display_name AS name FROM creators c WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scopeOf(req))} AND (c.handle LIKE ? OR c.display_name LIKE ?) LIMIT 8`)
-    .all(`${q}%`, `${q}%`) as any[];
+    .prepare(`SELECT 'creator' AS type, c.id, c.handle, c.display_name AS name FROM creators c WHERE c.deleted = 0 ${adult} AND ${creatorScopeSql(scopeOf(req))} AND (c.handle LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\') LIMIT 8`)
+    .all(like, like) as any[];
   res.json({
     items: [...users.map((u) => ({ ...u, avatar: `/m/ua/${u.id}` })), ...creators.map((c) => ({ ...c, avatar: `/m/ca/${c.id}` }))],
   });

@@ -7,15 +7,20 @@
  * mentions made (origin 'mention', soft-deleted at the end).
  *
  *   BASE=http://localhost:3901 SMOKE_USER=... SMOKE_PASS=... ADULT_POST_ID=<18+ post> \
- *     ADULT_CREATOR=<handle of an 18+ creator> node --import tsx server/scripts/smoke-mentions.ts
+ *     ADULT_CREATOR=<handle of an 18+ creator> SMOKE_PIN=<the user's 18+ PIN> node --import tsx server/scripts/smoke-mentions.ts
+ *
+ * The 18+ part edits ADULT_POST_ID, which needs the 18+ unlock: SMOKE_PIN.
  */
 const BASE = (process.env.BASE ?? 'http://localhost:3000').replace(/\/$/, '');
 const USER = process.env.SMOKE_USER ?? '';
 const PASS = process.env.SMOKE_PASS ?? '';
 const ADULT_POST_ID = Number(process.env.ADULT_POST_ID) || 0;
 const ADULT_CREATOR = (process.env.ADULT_CREATOR ?? '').toLowerCase();
+const PIN = process.env.SMOKE_PIN ?? '';
 
-let cookie = '';
+// name -> value; the session and the 18+ unlock are separate cookies.
+const jar = new Map<string, string>();
+const cookieHeader = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
 let failures = 0;
 let passes = 0;
 
@@ -28,12 +33,15 @@ function check(name: string, ok: boolean, detail = ''): void {
 type Scope = 'general' | 'unknown' | null;
 
 async function call(method: string, path: string, scope: Scope, body?: unknown): Promise<{ status: number; json: any }> {
-  const headers: Record<string, string> = { Origin: BASE, Cookie: cookie };
+  const headers: Record<string, string> = { Origin: BASE, Cookie: cookieHeader() };
   if (scope) headers['X-Egram-Audience'] = scope;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const r = await fetch(BASE + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' });
-  const set = r.headers.get('set-cookie');
-  if (set) cookie = set.split(';')[0];
+  for (const set of r.headers.getSetCookie()) {
+    const [pair] = set.split(';');
+    const i = pair.indexOf('=');
+    if (i > 0) jar.set(pair.slice(0, i).trim(), pair.slice(i + 1));
+  }
   const text = await r.text();
   let json: any = null;
   try {
@@ -50,7 +58,7 @@ const ids = (list: any): number[] => (list?.items ?? []).map((x: any) => x.id ??
 async function main(): Promise<void> {
   if (!USER || !PASS) throw new Error('Set SMOKE_USER and SMOKE_PASS');
   const login = await call('POST', '/api/auth/login', null, { username: USER, password: PASS });
-  check('login', login.status === 200 && !!cookie, `HTTP ${login.status}`);
+  check('login', login.status === 200 && jar.has('eg_session'), `HTTP ${login.status}`);
 
   const tag = Date.now().toString(36);
   const fresh = `smk_new_${tag}`;
@@ -139,7 +147,10 @@ async function main(): Promise<void> {
     const ma = await get(`/api/creators/${ADULT_CREATOR}/mentioned`, 'general');
     check('general: nor its "Mentioned in"', ma.status === 404, `HTTP ${ma.status}`);
   } else console.log('skip ADULT_CREATOR not set');
-  if (ADULT_POST_ID) {
+  if (ADULT_POST_ID && !PIN) console.log('skip ADULT_POST_ID needs SMOKE_PIN (18+ unlock)');
+  if (ADULT_POST_ID && PIN) {
+    const un = await call('POST', '/api/adult/unlock', null, { pin: PIN });
+    check('18+ unlock for the 18+ part', un.status === 200, `HTTP ${un.status}`);
     const ap = await get(`/api/posts/${ADULT_POST_ID}`);
     const before = ap.json?.caption ?? '';
     const e = await call('PATCH', `/api/posts/${ADULT_POST_ID}`, null, { caption: `${before} @${adultOnly} #smokeadult${tag}` });
@@ -152,8 +163,10 @@ async function main(): Promise<void> {
     check('general: the 18+ post is not under its hashtag', !ids(ht.json).includes(ADULT_POST_ID));
     const s = await get(`/api/search?q=${adultOnly}`, 'general');
     check('general: search does not find the 18+ post', !JSON.stringify(s.json ?? {}).includes(`"id":${ADULT_POST_ID},`));
-    await call('PATCH', `/api/posts/${ADULT_POST_ID}`, null, { caption: before });
-  } else console.log('skip ADULT_POST_ID not set');
+    const back = await call('PATCH', `/api/posts/${ADULT_POST_ID}`, null, { caption: before });
+    check('restore the 18+ caption', back.status === 200, `HTTP ${back.status}`);
+    await call('POST', '/api/adult/lock', null);
+  } else if (!ADULT_POST_ID) console.log('skip ADULT_POST_ID not set');
 
   // --- Restore -------------------------------------------------------------------------------
   const r = await call('PATCH', `/api/posts/${post.id}`, null, { caption: original });

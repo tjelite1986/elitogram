@@ -110,7 +110,9 @@ function creatorJson(req: Request, c: any) {
 }
 
 creators.get('/creators', (req, res) => {
-  const q = str(req.query.q, 80).trim().toLowerCase().replace(/[%_\\]/g, '');
+  const q = str(req.query.q, 80).trim().toLowerCase();
+  // LIKE wildcards are escaped, not removed: handles are full of underscores.
+  const like = `%${q.replace(/[%_\\]/g, (m) => '\\' + m)}%`;
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const limit = 60;
   const adult = adultUnlocked(req) ? '' : 'AND c.adult = 0';
@@ -121,8 +123,10 @@ creators.get('/creators', (req, res) => {
   // A creator made for an @name owns nothing to browse or classify until it
   // has posts of its own; it is listed only when searched for.
   const mentionOnly = q ? '' : "AND NOT (c.origin = 'mention' AND NOT EXISTS (SELECT 1 FROM posts po WHERE po.creator_id = c.id))";
-  const filter = q ? "AND (c.handle LIKE ? OR c.display_name LIKE ? OR EXISTS (SELECT 1 FROM creator_aliases a WHERE a.creator_id = c.id AND a.alias LIKE ?))" : '';
-  const args = q ? [`%${q}%`, `%${q}%`, `%${q}%`] : [];
+  const filter = q
+    ? "AND (c.handle LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM creator_aliases a WHERE a.creator_id = c.id AND a.alias LIKE ? ESCAPE '\\'))"
+    : '';
+  const args = q ? [like, like, like] : [];
   const rows = db
     .prepare(
       `SELECT c.id, c.handle, c.display_name, c.adult, c.audience, COALESCE(pc.n, 0) AS post_count, pc.latest
