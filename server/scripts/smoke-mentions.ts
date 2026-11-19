@@ -103,6 +103,10 @@ async function main(): Promise<void> {
   check('the existing creator lists the post too', ids(otherMen.json).includes(post.id));
   const ownMen = await get(`/api/creators/${author}/mentioned`, 'general');
   check('the author does not list its own post as a mention', !ids(ownMen.json).includes(post.id));
+  // The Grabbit gateway treats a creator the identity lookup does not answer for
+  // as 18+, so a limited profile and its mention links need an answer there.
+  const idn = await get(`/api/creator-identities?h=${fresh}&h=${other}`, 'general');
+  check('general: identities answer for the limited profile', idn.status === 200 && Array.isArray(idn.json?.items?.[fresh]) && Array.isArray(idn.json?.items?.[other.toLowerCase()]), JSON.stringify(idn.json));
 
   // --- Lists stay clean ----------------------------------------------------------------------
   const listAll = await get('/api/creators');
@@ -157,6 +161,8 @@ async function main(): Promise<void> {
     check('edit the 18+ post', e.status === 200, `HTTP ${e.status}`);
     const ca = await get(`/api/creators/${adultOnly}`, 'general');
     check('general: a creator mentioned only in 18+ does not open', ca.status === 404, `HTTP ${ca.status}`);
+    const ia = await get(`/api/creator-identities?h=${adultOnly}`, 'general');
+    check('general: identities do not answer for it', ia.status === 200 && !(adultOnly in (ia.json?.items ?? {})), JSON.stringify(ia.json));
     const cu = await get(`/api/creators/${adultOnly}`, 'unknown');
     check('review: its profile opens, but "Mentioned in" hides the 18+ post', cu.status === 200 && !ids((await get(`/api/creators/${adultOnly}/mentioned`, 'unknown')).json).includes(ADULT_POST_ID));
     const ht = await get(`/api/hashtags/smokeadult${tag}`, 'general');

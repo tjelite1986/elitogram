@@ -11,6 +11,18 @@ import { notify } from '../notify.js';
 
 export const creators = Router();
 
+// General scope only: a creator nobody classified general opens as a limited
+// profile when a post the scope shows mentions it, and it has no 18+ post.
+// Shared by the profile routes and creator-identities, so the Grabbit
+// gateway's 18+ check can resolve every creator a limited profile or a mention
+// link names.
+function limitedReachable(req: Request, creatorId: number): boolean {
+  if (scopeOf(req) !== 'general') return false;
+  return !!db
+    .prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${mentionTargetSql(req)} AND EXISTS (SELECT 1 FROM post_mentions pm JOIN posts p ON p.id = pm.post_id LEFT JOIN creators c ON c.id = p.creator_id LEFT JOIN users u ON u.id = p.user_id WHERE pm.creator_id = ? AND ${visible(req)})`)
+    .get(creatorId, creatorId);
+}
+
 // allowLimited: only the read routes (profile, posts, mentioned) accept a limited
 // profile; every write (edit, pictures, follow, merge, delete) refuses it with 404.
 function loadCreator(req: Request, handle: string, { allowLimited = false } = {}): any {
@@ -19,17 +31,9 @@ function loadCreator(req: Request, handle: string, { allowLimited = false } = {}
   if (c.adult && !adultUnlocked(req)) throw new HttpError(404, 'Profile not found');
   const scope = scopeOf(req);
   if (scope && !db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${creatorScopeSql(scope)}`).get(c.id)) {
-    // General only: a creator nobody classified general opens as a limited
-    // profile when a post the scope shows mentions it, and it has no 18+ post.
     // The limited profile names the handle and nothing else the creator owns
     // (no bio, links, aliases or picture), and lists only posts of the scope.
-    const reachable =
-      allowLimited &&
-      scope === 'general' &&
-      db
-        .prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${mentionTargetSql(req)} AND EXISTS (SELECT 1 FROM post_mentions pm JOIN posts p ON p.id = pm.post_id LEFT JOIN creators c ON c.id = p.creator_id LEFT JOIN users u ON u.id = p.user_id WHERE pm.creator_id = ? AND ${visible(req)})`)
-        .get(c.id, c.id);
-    if (!reachable) throw new HttpError(404, 'Profile not found');
+    if (!(allowLimited && limitedReachable(req, c.id))) throw new HttpError(404, 'Profile not found');
     c.limited = true;
   }
   return c;
@@ -232,8 +236,15 @@ creators.get('/creator-identities', (req, res) => {
   const account = db.prepare('SELECT 1 FROM users WHERE username = ?');
   const aliases = db.prepare('SELECT alias FROM creator_aliases WHERE creator_id = ?').pluck();
   const items: Record<string, string[]> = {};
+  // A creator outside the scope that opens there as a limited profile (general
+  // only) is answered too: the limited profile and the mention links name it.
+  const outside = db.prepare('SELECT c.id, c.handle, c.ig_handle, c.tiktok_handle, c.links FROM creators c WHERE c.handle = ? AND c.deleted = 0 AND c.adult = 0');
   for (const h of [...new Set(handles)]) {
-    const c = one.get({ h, me: req.user!.id }) as any;
+    let c = one.get({ h, me: req.user!.id }) as any;
+    if (!c && scope === 'general') {
+      const m = outside.get(h) as any;
+      if (m && limitedReachable(req, m.id)) c = m;
+    }
     if (!c) continue;
     const names = new Set<string>();
     for (const n of [...(aliases.all(c.id) as string[]), c.ig_handle, c.tiktok_handle, ...linkHandles(c.links)]) {
