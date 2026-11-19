@@ -107,6 +107,9 @@ async function main(): Promise<void> {
   // as 18+, so a limited profile and its mention links need an answer there.
   const idn = await get(`/api/creator-identities?h=${fresh}&h=${other}`, 'general');
   check('general: identities answer for the limited profile', idn.status === 200 && Array.isArray(idn.json?.items?.[fresh]) && Array.isArray(idn.json?.items?.[other.toLowerCase()]), JSON.stringify(idn.json));
+  const uHandle = `u-${underscored.replace(/^_+/, '')}`;
+  const idu = await get(`/api/creator-identities?h=${uHandle}`, 'general');
+  check('general: a u- handle lists only the @name as written', JSON.stringify(idu.json?.items?.[uHandle]) === JSON.stringify([underscored.toLowerCase()]), JSON.stringify(idu.json));
 
   // --- Lists stay clean ----------------------------------------------------------------------
   const listAll = await get('/api/creators');

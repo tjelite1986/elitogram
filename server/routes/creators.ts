@@ -237,21 +237,33 @@ creators.get('/creator-identities', (req, res) => {
   const aliases = db.prepare('SELECT alias FROM creator_aliases WHERE creator_id = ?').pluck();
   const items: Record<string, string[]> = {};
   // A creator outside the scope that opens there as a limited profile (general
-  // only) is answered too: the limited profile and the mention links name it.
-  const outside = db.prepare('SELECT c.id, c.handle, c.ig_handle, c.tiktok_handle, c.links FROM creators c WHERE c.handle = ? AND c.deleted = 0 AND c.adult = 0');
-  for (const h of [...new Set(handles)]) {
-    let c = one.get({ h, me: req.user!.id }) as any;
-    if (!c && scope === 'general') {
-      const m = outside.get(h) as any;
-      if (m && limitedReachable(req, m.id)) c = m;
-    }
-    if (!c) continue;
+  // only) is answered too, because the limited profile and the mention links
+  // name it. The limited profile hides the creator's other names, so this
+  // answer may list only the one name the limited profile shows itself (the
+  // @name as written, for a creator made from a mention: `_bs.tv` for
+  // `u-bs.tv`). A creator with any other name gets no answer, which the
+  // gateway's 18+ check treats as 18+ (closed).
+  const outside = db.prepare('SELECT c.id, c.handle, c.ig_handle, c.tiktok_handle, c.links, c.origin, c.display_name FROM creators c WHERE c.handle = ? AND c.deleted = 0 AND c.adult = 0');
+  const namesOf = (c: any): string[] => {
     const names = new Set<string>();
     for (const n of [...(aliases.all(c.id) as string[]), c.ig_handle, c.tiktok_handle, ...linkHandles(c.links)]) {
       const v = String(n ?? '').trim().replace(/^@/, '').toLowerCase();
       if (v && v !== c.handle) names.add(v.slice(0, 100));
     }
-    items[c.handle] = [...names];
+    return [...names];
+  };
+  for (const h of [...new Set(handles)]) {
+    const c = one.get({ h, me: req.user!.id }) as any;
+    if (c) {
+      items[c.handle] = namesOf(c);
+      continue;
+    }
+    if (scope !== 'general') continue;
+    const m = outside.get(h) as any;
+    if (!m || !limitedReachable(req, m.id)) continue;
+    const shown = m.origin === 'mention' ? String(m.display_name ?? '').trim().replace(/^@/, '').toLowerCase() : '';
+    const names = namesOf(m);
+    if (names.every((n) => n === shown)) items[m.handle] = names;
   }
   // Accounts have no other names; listed when they exist, whatever creator
   // shares the name.
