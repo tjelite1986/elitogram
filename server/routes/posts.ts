@@ -5,7 +5,7 @@ import { ah, HttpError, intParam, str } from '../http.js';
 import { creatorScopeSql, effectiveAudience, isScoped, parseClassify, scopeOf, scopeSql } from '../audience.js';
 import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles, mentionOriginVisibleSql } from '../views.js';
 import { parseUpload } from '../media/upload.js';
-import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, linkMentionsSafely, parseMentions, returnMediaHome, setPostHashtags, setPostMentions, withMoveLock, type Author } from '../library.js';
+import { addMediaToPost, createPost, creatorIdentityRev, currentPostAudience, findCreatorByHandle, findCreatorByName, indexPost, moveMediaToAuthor, linkMentionsSafely, parseMentions, returnMediaHome, setPostHashtags, setPostMentions, withMoveLock, type Author } from '../library.js';
 import { notify, notifyFollowers } from '../notify.js';
 
 export const posts = Router();
@@ -345,7 +345,8 @@ const CHANGED = 'The post changed while it was being edited; reload it and try a
 /**
  * Everything a post edit is decided on: the post's 18+ flag, audience,
  * deletion and author, its creator's classification, its media (each id with
- * its missing flag), the destination creator's classification and deletion,
+ * its missing flag), the destination creator's identity fingerprint
+ * (creatorIdentityRev: classification, deletion, handle, aliases, identities),
  * and the acting user's role, permissions and disabled flag. PATCH reads it
  * with its checks and compares it again before moving files and inside the
  * commit transaction.
@@ -358,7 +359,9 @@ function editState(postId: number, destCreatorId: number | null, userId: number)
        FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.id = ?`,
     )
     .get(postId);
-  const d = destCreatorId ? db.prepare('SELECT adult, audience, deleted FROM creators WHERE id = ?').get(destCreatorId) : null;
+  // The destination's whole identity, not only its classification: a merge
+  // into it or an edit of its handles changes what the move was judged on.
+  const d = destCreatorId ? creatorIdentityRev(destCreatorId) : null;
   const u = db.prepare('SELECT role, permissions, disabled FROM users WHERE id = ?').get(userId);
   return JSON.stringify([p ?? null, d ?? null, u ?? null]);
 }
@@ -381,9 +384,21 @@ posts.patch(
     if (body.audience !== undefined && !audience) throw new HttpError(400, 'audience must be general, unknown or adult');
     if (audience && audience !== 'adult' && audience !== row.audience && !classifier) throw new HttpError(403, 'Only a moderator can classify posts');
     let author: Author | null = null;
+    let boundRev: string | null = null;
     if (body.author && typeof body.author === 'object') {
       if (body.author.self) author = { userId: req.user!.id };
-      else {
+      else if (body.author.id !== undefined || body.author.rev !== undefined) {
+        // A move bound to the creator the caller checked (Grabbit's gateway):
+        // the handle must still be that creator's own handle, never an alias,
+        // and its id and identity fingerprint must be the ones read with it.
+        const c = findCreatorByHandle(str(body.author.creator, 80).replace(/^@/, ''));
+        if (!c || !destinationVisible(req, c.id)) throw new HttpError(400, 'Unknown creator');
+        if (c.id !== body.author.id || typeof body.author.rev !== 'string' || creatorIdentityRev(c.id) !== body.author.rev) {
+          throw new HttpError(409, 'The creator changed meanwhile; reload and try again');
+        }
+        author = { creatorId: c.id };
+        boundRev = body.author.rev;
+      } else {
         const c = findDestinationCreator(req, str(body.author.creator, 80));
         if (!c) throw new HttpError(400, 'Unknown creator');
         author = { creatorId: c.id };
@@ -417,6 +432,8 @@ posts.patch(
       if (editState(id, destId, req.user!.id) !== before) return CHANGED;
       // The destination may have stopped being visible to this caller meanwhile.
       if (destId && !destinationVisible(req, destId)) return CHANGED;
+      // A bound move commits only against the identity its caller checked.
+      if (boundRev !== null && destId && creatorIdentityRev(destId) !== boundRev) return CHANGED;
       // A post inherits 18+ from its creator; moving it keeps that restriction on
       // the post itself. Only a moderator who saw the 18+ creator may lift it.
       const keepAdult = !!author && !!row.c_adult && !classifier;

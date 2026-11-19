@@ -6,7 +6,7 @@ import { creatorScopeSql, parseClassify, refuseScoped, scopeOf, scopeSql } from 
 import { parseCursor, cursorSql, nextCursor, gridTiles, mentionOriginVisibleSql, mentionTargetSql, POST_FROM, visible } from '../views.js';
 import { parseUpload } from '../media/upload.js';
 import { APP_DIRS, isReservedName, mediaRel, placeFile, sniffFile, validateHandle } from '../media/files.js';
-import { createCreator, findCreatorByName, MediaRejected, moveMediaToAuthor, reindexCreator, returnMediaHome, withMoveLock } from '../library.js';
+import { createCreator, creatorIdentityRev, findCreatorByName, MediaRejected, moveMediaToAuthor, reindexCreator, returnMediaHome, withMoveLock } from '../library.js';
 import { notify } from '../notify.js';
 
 export const creators = Router();
@@ -76,6 +76,7 @@ function creatorJson(req: Request, c: any) {
       ig_autopoll: false,
       tiktok_autopoll: false,
       can_manage: false,
+      identity_rev: creatorIdentityRev(c.id),
     };
   }
   const aliases = db.prepare('SELECT alias FROM creator_aliases WHERE creator_id = ? ORDER BY alias').pluck().all(c.id);
@@ -113,6 +114,7 @@ function creatorJson(req: Request, c: any) {
     last_sync_at: full ? c.last_sync_at : undefined,
     last_sync_result: full ? c.last_sync_result : undefined,
     can_manage: full,
+    identity_rev: creatorIdentityRev(c.id),
   };
 }
 

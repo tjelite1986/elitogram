@@ -106,6 +106,8 @@ async function main(): Promise<void> {
   const C = `smokerace-c-${tag}`;
   const D = `smokerace-d-${tag}`;
   const E = [1, 2, 3].map((i) => `smokerace-e${i}-${tag}`);
+  // R9-01: bound moves (Grabbit's gateway sends { creator, id, rev }).
+  const F = [1, 2, 3].map((i) => `smokerace-f${i}-${tag}`);
   let modId = 0;
   const memberName = `smokerace-m-${tag}`;
   const memberPass = `pass-${tag}-${Math.random().toString(36).slice(2)}`;
@@ -113,7 +115,7 @@ async function main(): Promise<void> {
   let memberId = 0;
   const member = new Client();
   try {
-    for (const h of [A, B, C, D, ...E]) check(`create creator ${h}`, (await admin.call('POST', '/api/creators', null, { handle: h })).status === 201);
+    for (const h of [A, B, C, D, ...E, ...F]) check(`create creator ${h}`, (await admin.call('POST', '/api/creators', null, { handle: h })).status === 201);
     const mk = await admin.call('POST', '/api/admin/users', null, { username: memberName, password: memberPass });
     memberId = mk.json?.id ?? 0;
     check('create member', mk.status === 201 && memberId > 0);
@@ -250,9 +252,51 @@ async function main(): Promise<void> {
     check('the first merge succeeds', r8.status === 200, `${r8.status} ${JSON.stringify(r8.json)}`);
     check('the queued merge into the merged-away profile answers 409', merge2.status === 409, `${merge2.status} ${JSON.stringify(merge2.json)}`);
     check('the third profile keeps its post', (await admin.get(`/api/posts/${posts[posts.length - 1]}`)).json?.author?.handle === E[2]);
+
+    // --- R9-01: a move bound to the creator the caller checked -----------------
+    const bound = async (h: string) => {
+      const c = (await admin.get(`/api/creators/${h}`)).json;
+      return { creator: h, id: c?.id, rev: c?.identity_rev };
+    };
+    const p9 = await upload(admin, A, 1);
+    posts.push(p9);
+    const b9 = await bound(F[0]);
+    check('a creator answer carries identity_rev', typeof b9.rev === 'string' && /^[0-9a-f]{64}$/.test(b9.rev), String(b9.rev));
+    const ok9 = await admin.call('PATCH', `/api/posts/${p9}`, null, { author: b9 });
+    check('control: a fresh bound move succeeds', ok9.status === 200 && (await admin.get(`/api/posts/${p9}`)).json?.author?.handle === F[0], `${ok9.status} ${JSON.stringify(ok9.json)}`);
+    // Checked F2, then F2 is merged into F3: its handle is now an alias of F3.
+    const p10 = await upload(admin, A, 1);
+    posts.push(p10);
+    const b10 = await bound(F[1]);
+    const mg = await admin.call('POST', '/api/creators-merge', null, { from: F[1], into: F[2] });
+    check('the destination is merged away after the check', mg.status === 200, `${mg.status}`);
+    const r10 = await admin.call('PATCH', `/api/posts/${p10}`, null, { author: b10 });
+    check('a bound move to a merged-away handle is refused', r10.status === 400 || r10.status === 409, `${r10.status} ${JSON.stringify(r10.json)}`);
+    check('the post stays under A, not the merge survivor', (await admin.get(`/api/posts/${p10}`)).json?.author?.handle === A);
+    // Checked F3, then F3 gains an identity: the fingerprint no longer matches.
+    const p11 = await upload(admin, A, 1);
+    posts.push(p11);
+    const b11 = await bound(F[2]);
+    check('identity edit after the check', (await admin.call('PATCH', `/api/creators/${F[2]}`, null, { ig_handle: `ig${tag}` })).status === 200);
+    const r11 = await admin.call('PATCH', `/api/posts/${p11}`, null, { author: b11 });
+    check('a bound move with a stale fingerprint answers 409', r11.status === 409, `${r11.status} ${JSON.stringify(r11.json)}`);
+    check('the post stays under A', (await admin.get(`/api/posts/${p11}`)).json?.author?.handle === A);
+    // A wrong id for the right handle is refused too.
+    const b12 = await bound(F[2]);
+    const r12 = await admin.call('PATCH', `/api/posts/${p11}`, null, { author: { ...b12, id: b12.id + 100000 } });
+    check('a bound move with another id answers 409', r12.status === 409, `${r12.status}`);
+    // The destination's identity changes while the files move: nothing commits.
+    const b13 = await bound(F[2]);
+    const move13 = admin.call('PATCH', `/api/posts/${p11}`, null, { author: b13 });
+    await wait(DURING_MS);
+    const ed13 = await admin2.call('PATCH', `/api/creators/${F[2]}`, null, { tiktok_handle: `tt${tag}` });
+    const r13 = await move13;
+    check('identity edit lands during the move', ed13.status === 200, `${ed13.status}`);
+    check('the move answers 409', r13.status === 409, `${r13.status} ${JSON.stringify(r13.json)}`);
+    check('the post is under A again, its file served', (await admin.get(`/api/posts/${p11}`)).json?.author?.handle === A && (await mediaServed(admin, p11)));
   } finally {
     for (const id of posts) await admin.call('DELETE', `/api/posts/${id}`, null).catch(() => undefined);
-    for (const h of [A, B, C, D, ...E]) await admin.call('DELETE', `/api/creators/${h}`, null).catch(() => undefined);
+    for (const h of [A, B, C, D, ...E, ...F]) await admin.call('DELETE', `/api/creators/${h}`, null).catch(() => undefined);
     for (const uid of [memberId, modId]) if (uid) await admin.call('PATCH', `/api/admin/users/${uid}`, null, { disabled: true }).catch(() => undefined);
   }
   console.log(`\n${passes} passed, ${failures} failed`);
