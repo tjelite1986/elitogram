@@ -187,8 +187,10 @@ account.post('/notifications/read', (req, res) => {
   // `ids` limits it to the notifications the caller showed (a proxy may have
   // filtered some out of the list it was given); without it, every unread one.
   const raw = req.body?.ids;
-  if (raw !== undefined && (!Array.isArray(raw) || raw.length > 500)) throw new HttpError(400, 'ids must be a list of at most 500 ids');
-  const ids = Array.isArray(raw) ? [...new Set(raw.map(Number).filter((x) => Number.isInteger(x) && x > 0))] : null;
+  if (raw !== undefined && (!Array.isArray(raw) || raw.length > 500 || !raw.every((x) => Number.isSafeInteger(x) && x > 0))) {
+    throw new HttpError(400, 'ids must be a list of at most 500 positive integers');
+  }
+  const ids = Array.isArray(raw) ? [...new Set(raw as number[])] : null;
   if (ids && ids.length === 0) {
     res.json({ ok: true });
     return;

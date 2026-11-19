@@ -260,6 +260,35 @@ export async function addMediaToPost(postId: number, files: IncomingFile[], skip
  * Moves every media file of the given posts into the new author's folder and
  * re-points the rows. Used by "change author" and by merging creators.
  */
+/**
+ * Moves a file to a free name in `dirRel` without ever replacing a file: two
+ * moves (a reassignment and its undo, say) may pick the same free name at once,
+ * and the loser takes the next one.
+ */
+async function moveNoClobber(src: string, dirRel: string, hint: string, ext: string): Promise<string> {
+  for (let i = 0; ; i++) {
+    const dest = await uniqueTarget(dirRel, hint, ext);
+    try {
+      // A hard link fails with EEXIST instead of replacing; then the source goes.
+      await fsp.link(src, dest);
+      await fsp.unlink(src);
+      return dest;
+    } catch (err: any) {
+      if (err.code === 'EEXIST' && i < 20) continue;
+      if (err.code !== 'EXDEV' && err.code !== 'EPERM' && err.code !== 'ENOTSUP') throw err;
+    }
+    try {
+      // Another file system: copy without replacing, then remove the source.
+      await fsp.copyFile(src, dest, fs.constants.COPYFILE_EXCL);
+      await fsp.unlink(src);
+      return dest;
+    } catch (err: any) {
+      if (err.code === 'EEXIST' && i < 20) continue;
+      throw err;
+    }
+  }
+}
+
 export async function moveMediaToAuthor(postIds: number[], author: Author): Promise<void> {
   const dirRel = authorDir(author);
   const rows = db
@@ -271,8 +300,7 @@ export async function moveMediaToAuthor(postIds: number[], author: Author): Prom
     const src = mediaAbs(m.path);
     if (!fs.existsSync(src)) continue;
     const ext = m.path.match(/\.[^./]+$/)?.[0] ?? '';
-    const dest = await uniqueTarget(dirRel, m.path.split('/').pop() ?? 'file', ext);
-    await moveFile(src, dest);
+    const dest = await moveNoClobber(src, dirRel, m.path.split('/').pop() ?? 'file', ext);
     try {
       upd.run(mediaRel(dest), m.id);
     } catch (err) {

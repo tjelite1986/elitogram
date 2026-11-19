@@ -363,49 +363,51 @@ posts.patch(
       if (toRemove.length >= remaining) throw new HttpError(400, 'A post needs at least one media item; delete the post instead');
     }
 
-    // The reassignment goes first: when it is refused at commit time, nothing else
-    // in this request has been written yet.
-    if (author) {
-      await moveMediaToAuthor([id], author);
+    // Resubmitting the current author is no reassignment.
+    if (author && (author.creatorId ? author.creatorId === row.creator_id : !row.creator_id && author.userId === row.user_id)) author = null;
+    // Files move first (slow, outside any transaction). Every write of this
+    // request then lands in one transaction, checked again against the post as
+    // it is now: a moderator may have marked it (or its creator) 18+, an import
+    // may have held it for review, or the destination may have been classified
+    // general while the files moved. A refused request writes nothing and the
+    // files move back.
+    if (author) await moveMediaToAuthor([id], author);
+    const caption = typeof body.caption === 'string' ? str(body.caption) : null;
+    const refusal = db.transaction((): string | null => {
+      const cur = db
+        .prepare('SELECT p.adult, p.audience, COALESCE(c.adult, 0) AS c_adult FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.id = ?')
+        .get(id) as { adult: number; audience: string; c_adult: number } | undefined;
+      if (!cur) return 'Post not found';
+      if (!classifier && body.adult === false && cur.adult) return 'Only a moderator can lift 18+';
+      if (!classifier && audience && audience !== 'adult' && audience !== cur.audience) return 'Only a moderator can classify posts';
       // A post inherits 18+ from its creator; moving it keeps that restriction on
-      // the post itself. The source creator is read again here, in the same
-      // transaction as the move, because it may have been marked 18+ while the
-      // files were moving. Only a moderator who saw the 18+ creator may lift it.
-      // The destination is read again too: it may have been classified general
-      // while the files moved, and then only a moderator, or a post that will be
-      // 18+, may go under it. Otherwise the move is refused and undone.
-      const refused = db.transaction(() => {
-        const cur = db
-          .prepare('SELECT p.adult, COALESCE(c.adult, 0) AS c_adult FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.id = ?')
-          .get(id) as { adult: number; c_adult: number } | undefined;
-        const keepAdult = !!cur?.c_adult && (!classifier || !row.c_adult);
-        if (!classifier && author!.creatorId) {
-          const dest = db.prepare('SELECT audience FROM creators WHERE id = ?').pluck().get(author!.creatorId);
-          const adultAfter = !!cur?.adult || keepAdult || body.adult === true || audience === 'adult';
-          if (dest === 'general' && !adultAfter) return true;
-        }
-        db.prepare('UPDATE posts SET creator_id = ?, user_id = ? WHERE id = ?').run(author!.creatorId ?? null, author!.creatorId ? null : author!.userId, id);
-        if (keepAdult) db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
-        return false;
-      })();
-      if (refused) {
-        const back: Author = row.creator_id ? { creatorId: row.creator_id } : { userId: row.user_id };
-        await moveMediaToAuthor([id], back).catch((err) => console.error(`Could not move the files of post ${id} back: ${(err as Error).message}`));
-        throw new HttpError(403, 'Only a moderator can post under a creator classified general; mark the post 18+ or ask a moderator');
+      // the post itself. Only a moderator who saw the 18+ creator may lift it.
+      const keepAdult = !!author && !!cur.c_adult && (!classifier || !row.c_adult);
+      if (author && !classifier && author.creatorId) {
+        const dest = db.prepare('SELECT audience FROM creators WHERE id = ?').pluck().get(author.creatorId);
+        const adultAfter = !!cur.adult || keepAdult || body.adult === true || audience === 'adult';
+        if (dest === 'general' && !adultAfter) return 'Only a moderator can post under a creator classified general; mark the post 18+ or ask a moderator';
       }
-    }
-    if (typeof body.caption === 'string') {
-      const caption = str(body.caption);
-      db.transaction(() => {
+      if (author) db.prepare('UPDATE posts SET creator_id = ?, user_id = ? WHERE id = ?').run(author.creatorId ?? null, author.creatorId ? null : author.userId, id);
+      if (caption !== null) {
         db.prepare('UPDATE posts SET caption = ? WHERE id = ?').run(caption, id);
         setPostHashtags(id, caption);
-      })();
-      notifyMentions(caption, req.user!, id, 'post');
+      }
+      if (typeof body.adult === 'boolean') db.prepare('UPDATE posts SET adult = ? WHERE id = ?').run(body.adult ? 1 : 0, id);
+      if (keepAdult) db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
+      // 'adult' sets the 18+ flag; general/unknown only change the audience and never clear 18+.
+      if (audience === 'adult') db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
+      else if (audience) db.prepare('UPDATE posts SET audience = ? WHERE id = ?').run(audience, id);
+      return null;
+    })();
+    if (refusal) {
+      if (author) {
+        const back: Author = row.creator_id ? { creatorId: row.creator_id } : { userId: row.user_id };
+        await moveMediaToAuthor([id], back).catch((err) => console.error(`Could not move the files of post ${id} back: ${(err as Error).message}`));
+      }
+      throw new HttpError(refusal === 'Post not found' ? 404 : 403, refusal);
     }
-    if (typeof body.adult === 'boolean') db.prepare('UPDATE posts SET adult = ? WHERE id = ?').run(body.adult ? 1 : 0, id);
-    // 'adult' sets the 18+ flag; general/unknown only change the audience and never clear 18+.
-    if (audience === 'adult') db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
-    else if (audience) db.prepare('UPDATE posts SET audience = ? WHERE id = ?').run(audience, id);
+    if (caption !== null) notifyMentions(caption, req.user!, id, 'post');
     if (toRemove.length) {
       // Removed media move to a new hidden, deleted post so the file and its row stay recoverable.
       db.transaction(() => {

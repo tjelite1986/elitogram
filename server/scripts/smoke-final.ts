@@ -170,6 +170,10 @@ async function main(): Promise<void> {
     check('unscoped upload by a member without the 18+ unlock under X answers 400', toXLocked.status === 400, `${toXLocked.status}`);
     const moveX = await member.call('PATCH', `/api/posts/${pid}`, 'unknown', { author: { creator: X } });
     check('moving a post to 18+ X answers like an unknown creator', moveX.status === 400 && /Unknown creator/.test(String(moveX.json?.error)), `${moveX.status} ${JSON.stringify(moveX.json)}`);
+    const same = await member.call('PATCH', `/api/posts/${pid}`, 'unknown', { caption: 'smoke final', author: { creator: G } });
+    check('resubmitting the current general creator with a caption edit is no reassignment', same.status === 200, `${same.status} ${JSON.stringify(same.json)}`);
+    const stale = await member.call('PATCH', `/api/posts/${pid}`, 'unknown', { audience: 'unknown' });
+    check('a member cannot write unknown over a held post', stale.status === 403, `${stale.status}`);
     const own = await upload(member, null, '', 1);
     if (Number.isInteger(own.json?.id)) posts.push(own.json.id);
     check('unscoped upload answer still states the audience', own.status === 201 && typeof own.json?.audience === 'string', JSON.stringify(own.json));

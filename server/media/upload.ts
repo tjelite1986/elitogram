@@ -32,6 +32,7 @@ export function parseUpload(req: Request): Promise<ParsedUpload> {
     const files: Uploaded[] = [];
     const writes: Promise<void>[] = [];
     const outs: fs.WriteStream[] = [];
+    const closings: Promise<void>[] = [];
     const cleanup = async () => {
       await Promise.all(files.map((f) => fsp.unlink(f.abs).catch(() => undefined)));
     };
@@ -48,7 +49,8 @@ export function parseUpload(req: Request): Promise<ParsedUpload> {
       req.unpipe(bb);
       bb.removeAllListeners('file');
       for (const out of outs) out.destroy();
-      await Promise.allSettled(writes);
+      // Every writer has released its file before the staged paths are removed.
+      await Promise.allSettled([...writes, ...closings]);
       settled = true;
       await cleanup();
       reject(err);
@@ -79,15 +81,17 @@ export function parseUpload(req: Request): Promise<ParsedUpload> {
       stream.on('limit', () => {
         failed = new Error(`File ${info.filename} is larger than the upload limit`);
       });
+      const closed = new Promise<void>((res) => out.once('close', () => res()));
+      closings.push(closed);
       const written = new Promise<void>((res, rej) => {
         out.on('finish', res);
         out.on('close', res);
         out.on('error', rej);
         stream.on('error', rej);
       });
-      // Handled here as well, so a writer that fails after the parser has
-      // already failed is never an unhandled rejection.
-      written.catch(() => undefined);
+      // A failed writer starts the teardown at once (the parser may not close
+      // while the request stays open); handled here, it is never unhandled.
+      written.catch((err) => void fail(err as Error));
       writes.push(written);
       stream.pipe(out);
     });
