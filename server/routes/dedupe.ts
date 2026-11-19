@@ -29,11 +29,10 @@ import { cacheClean, cacheRebuild, cacheStatus } from '../media/cache.js';
  */
 export const dedupe = Router();
 
-let cached: { at: number; value: string | null } | null = null;
 function expectedToken(): string | null {
-  if (cached && Date.now() - cached.at < 60_000) return cached.value;
-  // The mounted file is the only source, the same one Grabbit reads; a missing
-  // or unreadable file switches the routes off.
+  // The mounted file is the only source, the same one Grabbit reads. It is
+  // read on every request, so a rotated or removed token takes effect at
+  // once; a missing or unreadable file switches the routes off.
   let value: string | null = null;
   const file = process.env.GRABBIT_DEDUPE_TOKEN_FILE;
   if (file) {
@@ -44,7 +43,6 @@ function expectedToken(): string | null {
     }
   }
   if (value && value.length < 32) value = null;
-  cached = { at: Date.now(), value };
   return value;
 }
 

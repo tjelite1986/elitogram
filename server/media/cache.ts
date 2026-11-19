@@ -101,6 +101,15 @@ async function walk(): Promise<Entry[]> {
   return out;
 }
 
+function present(abs: string): boolean {
+  try {
+    fs.lstatSync(abs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function realDir(abs: string): boolean {
   try {
     return fs.lstatSync(abs).isDirectory();
@@ -184,7 +193,12 @@ export function cacheClean(dryRun: boolean) {
     let bytes = 0;
     let skipped = 0;
     const errors: string[] = [];
-    for (const e of batch) {
+    // Walk the whole list until CLEAN_LIMIT files are removed: entries that
+    // became current again or were already gone do not use up the batch, or
+    // a run of them at the front would stall every later call. Twenty real
+    // errors stop the call.
+    for (const e of list) {
+      if (files >= CLEAN_LIMIT || errors.length >= 20) break;
       if (!stillRemovable(e)) {
         skipped++;
         continue;
@@ -194,7 +208,8 @@ export function cacheClean(dryRun: boolean) {
         files++;
         bytes += e.bytes;
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT' && errors.length < 20) errors.push(`${e.rel}: ${(err as Error).message}`);
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') skipped++;
+        else errors.push(`${e.rel}: ${(err as Error).message}`);
       }
     }
     // Shard folders stay, even empty: a thumbnail() that just made one would
@@ -206,13 +221,26 @@ export function cacheClean(dryRun: boolean) {
 
 export function cacheRebuild(dryRun: boolean) {
   return exclusive(async () => {
+    // A _thumbs that exists but is not a real folder (a symlink or a file)
+    // would have the rebuild write through it into someone else's files.
+    if (present(mediaAbs(APP_DIRS.thumbs)) && !realDir(mediaAbs(APP_DIRS.thumbs))) {
+      throw Object.assign(new Error('The thumbnail folder is not a real folder of this app; nothing was written'), { status: 409 });
+    }
     const todo = missing(await walk());
     if (dryRun) return { dryRun: true, missing: todo.length, limit: Math.min(REBUILD_LIMIT, todo.length) };
     let made = 0;
     let failed = 0;
     for (const m of todo.slice(0, REBUILD_LIMIT)) {
+      // The same check per write, for the folder and the shard it lands in.
+      const key = `m${m.ident}`;
+      const shard = mediaAbs(`${APP_DIRS.thumbs}/${key.slice(-2).padStart(2, '0')}`);
+      if (present(mediaAbs(APP_DIRS.thumbs)) && !realDir(mediaAbs(APP_DIRS.thumbs))) break;
+      if (present(shard) && !realDir(shard)) {
+        failed++;
+        continue;
+      }
       try {
-        await thumbnail(m.path, m.kind, `m${m.ident}`, REBUILD_WIDTH);
+        await thumbnail(m.path, m.kind, key, REBUILD_WIDTH);
         made++;
       } catch {
         failed++;

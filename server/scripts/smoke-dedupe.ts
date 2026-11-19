@@ -1,7 +1,7 @@
 /**
  * Smoke test for Grabbit dedupe v1 (server/routes/dedupe.ts). Runs on a
  * throwaway DATA_DIR and MEDIA_ROOT, never on a real library:
- *   T=$(mktemp -d) && mkdir -p $T/data $T/media/alice && \
+ *   T=$(mktemp -d) && mkdir -p $T/data $T/media && \
  *   head -c 48 /dev/urandom | base64 > $T/token && \
  *   T=$T DATA_DIR=$T/data MEDIA_ROOT=$T/media GRABBIT_DEDUPE_TOKEN_FILE=$T/token npx tsx server/scripts/smoke-dedupe.ts
  * Exits non-zero when a check fails.
@@ -18,6 +18,16 @@ if (path.resolve(process.env.DATA_DIR || '') !== path.join(path.resolve(T), 'dat
 if (fs.existsSync(path.join(T, 'data')) && fs.readdirSync(path.join(T, 'data')).length) throw new Error('$T/data must be empty');
 if (fs.existsSync(path.join(T, 'media', '_thumbs'))) throw new Error('$T/media must be fresh');
 const media = path.join(T, 'media');
+// The test writes alice/ itself; one that is already there (or a symlink to
+// a real library) is refused before anything is written.
+try {
+  fs.lstatSync(path.join(media, 'alice'));
+  throw new Error('$T/media/alice must not exist before the test');
+} catch (e) {
+  if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+}
+fs.mkdirSync(media, { recursive: true });
+fs.mkdirSync(path.join(media, 'alice'));
 const { db } = await import('../db/index.js');
 const { mediaIdentity } = await import('../media/files.js');
 const { dedupe } = await import('../routes/dedupe.js');
@@ -85,6 +95,25 @@ expect('current thumbnail still there', exists(currentThumb));
 await call('POST', 'cache/rebuild', { dryRun: false });
 await call('GET', 'cache');
 console.log(execList());
+// A _thumbs that is a symlink: the rebuild refuses and writes nothing there.
+const elsewhere = path.join(T, 'elsewhere');
+fs.mkdirSync(elsewhere);
+fs.renameSync(path.join(media, '_thumbs'), path.join(media, '_thumbs.real'));
+fs.symlinkSync(elsewhere, path.join(media, '_thumbs'));
+const rb = await call('POST', 'cache/rebuild', { dryRun: false });
+expect('rebuild refuses a symlinked _thumbs', rb.status === 409 && fs.readdirSync(elsewhere).length === 0);
+const cl = await call('POST', 'cache/clean', { dryRun: false });
+expect('clean finds nothing through a symlinked _thumbs', cl.files === 0 && fs.readdirSync(elsewhere).length === 0);
+fs.unlinkSync(path.join(media, '_thumbs'));
+fs.renameSync(path.join(media, '_thumbs.real'), path.join(media, '_thumbs'));
+// The token file is read on every request: a rotated token works at once,
+// the old one stops, and a removed file closes the routes.
+const NEW = 'n'.repeat(40);
+fs.writeFileSync(process.env.GRABBIT_DEDUPE_TOKEN_FILE!, NEW);
+expect('rotated token works at once', (await call('GET', 'cache', undefined, NEW)).status !== 401);
+expect('old token refused at once', (await call('GET', 'cache', undefined, TOK)).status === 401);
+fs.unlinkSync(process.env.GRABBIT_DEDUPE_TOKEN_FILE!);
+expect('missing token file fails closed', (await call('GET', 'cache', undefined, NEW)).status === 401);
 function execList() { const out: string[] = []; const walk = (d: string) => { for (const f of fs.readdirSync(d, { withFileTypes: true })) { if (f.isDirectory()) walk(path.join(d, f.name)); else out.push(path.relative(media, path.join(d, f.name))); } }; walk(path.join(media, '_thumbs')); return out.sort().join('\n'); }
 srv.close();
 if (failed) {
