@@ -5,7 +5,7 @@ import { db } from '../db/index.js';
 import { effectiveAudience } from '../audience.js';
 import { ah } from '../http.js';
 import { APP_DIRS, mediaAbs, mediaIdentity } from '../media/files.js';
-import { cacheClean, cacheRebuild, cacheStatus, type Cancel } from '../media/cache.js';
+import { cacheClean, cacheRebuild, cacheStatus, parseCursor, type Cancel } from '../media/cache.js';
 
 /**
  * Grabbit dedupe v1: Elitogram's side of Grabbit's Smart Duplicate Manager.
@@ -17,7 +17,7 @@ import { cacheClean, cacheRebuild, cacheStatus, type Cancel } from '../media/cac
  *   POST /api/dedupe/v1/lookup        { paths: [mediaRel] } -> which posts, creators or stories use each file
  *   GET  /api/dedupe/v1/cache                               -> thumbnail cache counts
  *   POST /api/dedupe/v1/cache/clean   { dryRun }            -> removes unused thumbnails
- *   POST /api/dedupe/v1/cache/rebuild { dryRun, retryFailed } -> makes missing thumbnails, a batch at a time
+ *   POST /api/dedupe/v1/cache/rebuild { dryRun, retryFailed, cursor } -> makes missing thumbnails, a batch at a time
  *
  * cache/rebuild answers within about 15 s, counted from the request's arrival
  * (the cache walk and DB query included), with:
@@ -36,12 +36,20 @@ import { cacheClean, cacheRebuild, cacheStatus, type Cancel } from '../media/cac
  *                 in the background (that media is skipped from then on)
  *   stoppedEarly  true when the call stopped before its batch was done
  *   stopReason    'time' | 'disconnected' | null
- *   discoveryIncomplete  true when the time ran out while finding what is
- *                 missing; nothing was made and missing/remaining are null
+ *   cursor        where the next call continues ("v1.<n>"), or null once
+ *                 this call reached the end of the library with nothing
+ *                 left to try. Send it back verbatim as the request's cursor;
+ *                 any other value is refused with 400. Without one a call
+ *                 starts at the newest media.
+ *   discoveryIncomplete  true when this call did not look at every media
+ *                 row up to the end (time ran out, or a full batch was
+ *                 found); missing and remaining then count only the part
+ *                 covered, and the cursor names where to go on
  * retryFailed: true forgets the parked failures first, so this call tries
  * them again (in-flight ones stay skipped until they finish). The memory is
  * per process and lasts 30 minutes per media id. dryRun answers
- * { dryRun, missing, skipped, limit } and changes nothing.
+ * { dryRun, missing, skipped, limit, cursor, discoveryIncomplete } and
+ * changes nothing; it covers what fits in the time budget, like a rebuild.
  *
  * There is no link/restore/purge here: posts never share a media file in this
  * app, and a duplicate post is removed in Elitogram's own UI.
@@ -121,7 +129,15 @@ dedupe.post('/cache/clean', ah(async (req, res) => {
 dedupe.post('/cache/rebuild', ah(async (req, res) => {
   const cancel = cancelOnClose(res);
   const startedAt = typeof res.locals.startedAt === 'number' ? res.locals.startedAt : Date.now();
-  const out = await cacheRebuild(dryRunOf(req), cancel, { startedAt, retryFailed: req.body?.retryFailed === true });
+  // Absent or null starts at the top; anything else must be a cursor this
+  // app handed out.
+  const raw = req.body?.cursor;
+  const cursor = raw === undefined || raw === null ? null : parseCursor(raw);
+  if (raw !== undefined && raw !== null && cursor === null) {
+    res.status(400).json({ error: 'Invalid cursor' });
+    return;
+  }
+  const out = await cacheRebuild(dryRunOf(req), cancel, { startedAt, retryFailed: req.body?.retryFailed === true, cursor });
   if (!cancel.cancelled()) res.json(out);
 }));
 

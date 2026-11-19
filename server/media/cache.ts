@@ -282,6 +282,45 @@ export interface RebuildOptions {
   startedAt?: number;
   /** Forget earlier failures first, so this call tries those media again. */
   retryFailed?: boolean;
+  /** Where an earlier call stopped (its answer's cursor); absent starts at the top. */
+  cursor?: number | null;
+}
+
+// Rebuild discovery pages through the media rows, newest id first, and looks
+// for each row's expected thumbnail name, instead of walking the whole cache
+// on every call. A call covers what fits in its budget and answers with a
+// cursor; the next call continues from there, so a library too large to
+// check in one call is still worked through. Grabbit sends the cursor back
+// verbatim; it encodes "continue with media ids below N".
+const DISCOVERY_PAGE = 500;
+function discoveryPage(): number {
+  const v = Number(process.env.EGRAM_DEDUPE_DISCOVERY_PAGE);
+  return Number.isInteger(v) && v >= 1 ? Math.min(v, DISCOVERY_PAGE) : DISCOVERY_PAGE;
+}
+const CURSOR = /^v1\.([1-9]\d{0,14})$/;
+/** The id bound in a cursor, or null for a malformed one. */
+export function parseCursor(raw: unknown): number | null {
+  if (typeof raw !== 'string') return null;
+  const m = CURSOR.exec(raw);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isSafeInteger(n) ? n : null;
+}
+const cursorOf = (below: number | null) => (below === null ? null : `v1.${below}`);
+
+const pageQuery = db.prepare(
+  `SELECT m.id, m.path, m.kind, m.sha256, m.created_at FROM media m JOIN posts p ON p.id = m.post_id
+    WHERE m.missing = 0 AND p.deleted = 0 AND m.id < ? ORDER BY m.id DESC LIMIT ?`,
+);
+
+type Todo = { id: number; path: string; kind: 'image' | 'video'; ident: string; done?: boolean; skip?: boolean };
+
+function hasThumb(key: string): boolean {
+  try {
+    return fs.lstatSync(mediaAbs(`${APP_DIRS.thumbs}/${key.slice(-2).padStart(2, '0')}/${key}_${REBUILD_WIDTH}.webp`)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 export function cacheRebuild(dryRun: boolean, cancel: Cancel = never, opts: RebuildOptions = {}) {
@@ -295,43 +334,87 @@ export function cacheRebuild(dryRun: boolean, cancel: Cancel = never, opts: Rebu
     }
     pruneParked(Date.now());
     if (opts.retryFailed && !dryRun) for (const [id, p] of parked) if (p.state === 'failed') parked.delete(id);
-    // The budget covers discovery too: a slow cache walk or DB query must not
-    // leave a slow encode enough time to push the answer past Grabbit's 20 s.
+    // The budget covers discovery too, and discovery gets at most half of it,
+    // so a slow DB or disk still leaves time to make thumbnails. One page is
+    // always read, so every call moves the cursor on.
     const timeLeft = () => budget - (Date.now() - started);
-    let todo: ReturnType<typeof missing>;
-    try {
-      const entries = await walk({ expired: () => !dryRun && (timeLeft() <= 0 || cancel.cancelled()) });
-      todo = missing(entries);
-    } catch (err) {
-      if (!(err instanceof OutOfTime)) throw err;
-      return {
-        dryRun: false, made: 0, failed: 0, failures: listFailures(), missing: null, remaining: null, skipped: 0, inProgress: 0,
-        stoppedEarly: true, stopReason: (cancel.cancelled() ? 'disconnected' : 'time') as StopReason, discoveryIncomplete: true,
-      };
-    }
     const isParked = (m: { id: number; ident: string }) => parked.get(m.id)?.ident === m.ident;
-    const work = todo.filter((m) => !isParked(m));
-    const skipped = todo.length - work.length;
-    if (dryRun) return { dryRun: true, missing: todo.length, skipped, limit: Math.min(REBUILD_LIMIT, work.length) };
+    const page = discoveryPage();
+    const todo: Todo[] = [];
+    let work = 0;
+    let skipped = 0;
+    // Every media id >= below has been looked at; null once the end is reached.
+    let below: number | null = opts.cursor ?? Number.MAX_SAFE_INTEGER;
+    let pages = 0;
+    let discoveryStop: StopReason = null;
+    while (below !== null) {
+      if (pages > 0) {
+        if (cancel.cancelled()) {
+          discoveryStop = 'disconnected';
+          break;
+        }
+        if (Date.now() - started >= budget / 2) {
+          discoveryStop = 'time';
+          break;
+        }
+        if (!dryRun && work >= REBUILD_LIMIT) break;
+        // Let requests through between pages.
+        await new Promise((r) => setImmediate(r));
+      }
+      const rows = pageQuery.all(below, page) as any[];
+      pages++;
+      let full = false;
+      for (const r of rows) {
+        below = r.id;
+        const ident = mediaIdentity(r);
+        if (hasThumb(`m${ident}`)) continue;
+        const m: Todo = { id: r.id, path: r.path, kind: r.kind, ident };
+        todo.push(m);
+        // Decided once: a parked thumbnail that finishes in the background
+        // during this call stays skipped here and is not counted as remaining.
+        if (isParked(m)) {
+          m.skip = true;
+          skipped++;
+        }
+        else if (++work >= REBUILD_LIMIT && !dryRun) {
+          full = true;
+          break;
+        }
+      }
+      if (!full && rows.length < page) below = null;
+    }
+    const discoveryIncomplete = below !== null;
+    if (dryRun) {
+      return { dryRun: true, missing: todo.length, skipped, limit: Math.min(REBUILD_LIMIT, work), cursor: cursorOf(below), discoveryIncomplete };
+    }
     let made = 0;
     let failed = 0;
     let inProgress = 0;
-    let stopReason: StopReason = null;
-    for (const m of work.slice(0, REBUILD_LIMIT)) {
+    let stopReason: StopReason = discoveryStop;
+    // Where the work loop stopped, as a cursor bound: media from there on
+    // were not tried and the next call looks at them again.
+    let stoppedAt: number | null = null;
+    for (const m of todo) {
+      if (m.skip) continue;
       // Nothing new starts once the time is spent or Grabbit has gone.
       if (cancel.cancelled()) {
         stopReason = 'disconnected';
+        stoppedAt = m.id + 1;
         break;
       }
       const left = timeLeft();
       if (left <= 0) {
         stopReason = 'time';
+        stoppedAt = m.id + 1;
         break;
       }
       // The same check per write, for the folder and the shard it lands in.
       const key = `m${m.ident}`;
       const shard = mediaAbs(`${APP_DIRS.thumbs}/${key.slice(-2).padStart(2, '0')}`);
-      if (present(mediaAbs(APP_DIRS.thumbs)) && !realDir(mediaAbs(APP_DIRS.thumbs))) break;
+      if (present(mediaAbs(APP_DIRS.thumbs)) && !realDir(mediaAbs(APP_DIRS.thumbs))) {
+        stoppedAt = m.id + 1;
+        break;
+      }
       if (present(shard) && !realDir(shard)) {
         failed++;
         parkFailed(m.id, m.ident, 'Thumbnail folder is not a real folder');
@@ -350,6 +433,7 @@ export function cacheRebuild(dryRun: boolean, cancel: Cancel = never, opts: Rebu
         if (r === 'late') {
           inProgress++;
           stopReason = 'time';
+          stoppedAt = m.id;
           parked.set(m.id, { state: 'inflight', ident: m.ident, at: Date.now() });
           job.then(
             () => {
@@ -368,14 +452,15 @@ export function cacheRebuild(dryRun: boolean, cancel: Cancel = never, opts: Rebu
         clearTimeout(timer);
       }
     }
-    // missing: media still without a thumbnail, parked ones included.
-    // remaining: of those, the ones a next call would try (parked ones are
-    // left out), so a caller looping while remaining > 0 comes to an end.
+    // missing: media still without a thumbnail in the part covered so far,
+    // parked ones included. remaining: of those, the ones a next call would
+    // try (parked ones are left out). Both count only up to the cursor.
     const missingNow = todo.filter((m) => !m.done);
-    const remaining = missingNow.filter((m) => !isParked(m)).length;
+    const remaining = missingNow.filter((m) => !m.skip && !isParked(m)).length;
+    const next = stoppedAt ?? below;
     return {
       dryRun: false, made, failed, failures: listFailures(), missing: missingNow.length, remaining, skipped, inProgress,
-      stoppedEarly: stopReason !== null, stopReason, discoveryIncomplete: false,
+      stoppedEarly: stopReason !== null, stopReason, discoveryIncomplete, cursor: cursorOf(next),
     };
   });
 }

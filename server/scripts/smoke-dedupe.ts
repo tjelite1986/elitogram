@@ -50,6 +50,7 @@ const tokenFile = path.join(tokenDir, 'token');
 fs.writeFileSync(tokenFile, crypto.randomBytes(36).toString('base64'), { mode: 0o600, flag: 'wx' });
 process.env.GRABBIT_DEDUPE_TOKEN_FILE = tokenFile;
 delete process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS;
+delete process.env.EGRAM_DEDUPE_DISCOVERY_PAGE;
 const { db } = await import('../db/index.js');
 const { mediaIdentity } = await import('../media/files.js');
 const { dedupe } = await import('../routes/dedupe.js');
@@ -144,10 +145,10 @@ const out10 = `_thumbs/${`m${id10}`.slice(-2).padStart(2, '0')}/m${id10}_480.web
 fs.mkdirSync(path.dirname(path.join(media, out10)), { recursive: true });
 fs.symlinkSync(victim, path.join(media, `${out10}.${process.pid}.tmp`));
 // The budget counts from the request's arrival and covers discovery: with
-// none left, the call stops before making anything.
+// none left, the call reads one page, makes nothing and hands out a cursor.
 process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS = '0';
 const none = await call('POST', 'cache/rebuild', { dryRun: false });
-expect('zero budget: stops in discovery', none.status === 200 && none.discoveryIncomplete === true && none.stoppedEarly === true && none.stopReason === 'time' && none.made === 0 && none.remaining === null);
+expect('zero budget: makes nothing, answers a cursor', none.status === 200 && none.stoppedEarly === true && none.stopReason === 'time' && none.made === 0 && none.remaining > 0 && typeof none.cursor === 'string');
 // A small time budget: the call answers with part of the work and says how
 // much is left. The walk's own time varies, so grow the budget until a call
 // gets past discovery.
@@ -157,11 +158,18 @@ for (const ms of [20, 40, 80, 160, 320]) {
   part = await call('POST', 'cache/rebuild', { dryRun: false });
   if (!part.discoveryIncomplete) break;
 }
-expect('small budget: partial rebuild with remaining', part.status === 200 && part.discoveryIncomplete === false && part.stoppedEarly === true && part.stopReason === 'time' && part.remaining > 0 && part.made < extra && part.remaining === part.missing - part.inProgress && part.skipped === 0);
+expect('small budget: partial rebuild with remaining', part.status === 200 && part.discoveryIncomplete === false && part.stoppedEarly === true && part.stopReason === 'time' && part.remaining > 0 && part.made < extra && part.remaining === part.missing - part.inProgress && part.skipped === 0 && typeof part.cursor === 'string');
 delete process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS;
-let left = part.remaining;
-for (let i = 0; i < 5 && left > 0; i++) left = (await call('POST', 'cache/rebuild', { dryRun: false })).remaining;
-expect('repeated rebuilds finish', left === 0);
+// Rebuild until the cursor runs out, sending it back verbatim.
+const rebuildAll = async () => {
+  let x: any = { cursor: null };
+  let rounds = 0;
+  do x = await call('POST', 'cache/rebuild', { dryRun: false, cursor: x.cursor });
+  while (x.cursor !== null && x.status === 200 && rounds++ < 20);
+  return x;
+};
+const all = await rebuildAll();
+expect('repeated rebuilds finish', all.cursor === null && all.remaining === 0 && all.discoveryIncomplete === false);
 const out10St = fs.lstatSync(path.join(media, out10));
 expect('symlink at the old temp name not followed', fs.readFileSync(victim, 'utf8') === 'victim' && out10St.isFile() && !out10St.isSymbolicLink());
 expect('no temp files left by rebuild', !execList().split('\n').some((f) => /\.webp\.\d+-[0-9a-f]{16}\.tmp$/.test(f)));
@@ -186,7 +194,28 @@ fs.writeFileSync(path.join(media, 'alice/bad.png'), png);
 const f4 = await call('POST', 'cache/rebuild', { dryRun: false });
 expect('fixed file stays skipped without retryFailed', f4.skipped === 1 && f4.made === 0 && f4.remaining === 0);
 const f5 = await call('POST', 'cache/rebuild', { dryRun: false, retryFailed: true });
-expect('retryFailed makes it once fixed', f5.made === 1 && f5.skipped === 0 && f5.missing === 0 && f5.remaining === 0 && !f5.failures?.some((f: any) => f.id === 200));
+expect('retryFailed makes it once fixed', f5.made === 1 && f5.skipped === 0 && f5.missing === 0 && f5.remaining === 0 && !f5.failures?.some((f: any) => f.id === 200) && f5.cursor === null);
+// A cursor is only one this app handed out.
+for (const c of ['x', 'v1.0', 'v1.01', 'v2.5', 5, 'v1.99999999999999999', { below: 5 }]) {
+  expect(`bad cursor ${JSON.stringify(c)}: 400`, (await call('POST', 'cache/rebuild', { dryRun: false, cursor: c })).status === 400);
+}
+// Discovery runs out of time part way: the newest page has every thumbnail,
+// the missing ones are further down. The cursor carries the next call there.
+for (let id = 300; id < 305; id++) addMedia(id, `alice/p${id}.png`, png, now + 200_000 + id);
+expect('newest page made first', (await rebuildAll()).cursor === null);
+for (let id = 250; id < 253; id++) addMedia(id, `alice/p${id}.png`, png, now + 150_000 + id);
+process.env.EGRAM_DEDUPE_DISCOVERY_PAGE = '5';
+process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS = '0';
+const d1 = await call('POST', 'cache/rebuild', { dryRun: false });
+expect('time out mid-discovery: nothing found yet, cursor handed out', d1.status === 200 && d1.made === 0 && d1.missing === 0 && d1.discoveryIncomplete === true && d1.stopReason === 'time' && typeof d1.cursor === 'string');
+const dd = await call('POST', 'cache/rebuild', { cursor: d1.cursor });
+expect('dry run takes the cursor too', dd.status === 200 && dd.dryRun === true && typeof dd.missing === 'number');
+delete process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS;
+const d2 = await call('POST', 'cache/rebuild', { dryRun: false, cursor: d1.cursor });
+expect('the cursor continues discovery and makes the rest', d2.status === 200 && d2.made === 3 && d2.cursor === null && d2.discoveryIncomplete === false);
+delete process.env.EGRAM_DEDUPE_DISCOVERY_PAGE;
+const d3 = await call('POST', 'cache/rebuild', { dryRun: false });
+expect('a fresh pass finds nothing left', d3.made === 0 && d3.missing === 0 && d3.cursor === null);
 // A shard that is a symlink is refused at publish time, even when the
 // caller did not check it (a view request), and nothing lands behind it.
 const { thumbnail } = await import('../media/probe.js');
