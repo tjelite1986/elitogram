@@ -7,6 +7,7 @@ import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydr
 import { parseUpload } from '../media/upload.js';
 import { addMediaToPost, createPost, creatorIdentityRev, currentPostAudience, findCreatorByHandle, findCreatorByName, indexPost, moveMediaToAuthor, linkMentionsSafely, parseMentions, returnMediaHome, setPostHashtags, setPostMentions, withMoveLock, type Author } from '../library.js';
 import { notify, notifyFollowers } from '../notify.js';
+import { profileReachable } from './creators.js';
 
 export const posts = Router();
 
@@ -346,7 +347,7 @@ const CHANGED = 'The post changed while it was being edited; reload it and try a
  * Everything a post edit is decided on: the post's 18+ flag, audience,
  * deletion and author, its creator's classification, its media (each id with
  * its missing flag), the destination creator's identity fingerprint
- * (creatorIdentityRev: classification, deletion, handle, aliases, identities),
+ * (creatorIdentityRev: id and identity sequence),
  * and the acting user's role, permissions and disabled flag. PATCH reads it
  * with its checks and compares it again before moving files and inside the
  * commit transaction.
@@ -392,7 +393,7 @@ posts.patch(
         // the handle must still be that creator's own handle, never an alias,
         // and its id and identity fingerprint must be the ones read with it.
         const c = findCreatorByHandle(str(body.author.creator, 80).replace(/^@/, ''));
-        if (!c || !destinationVisible(req, c.id)) throw new HttpError(400, 'Unknown creator');
+        if (!c || !destinationVisible(req, c.id) || !profileReachable(req, c.id)) throw new HttpError(400, 'Unknown creator');
         if (c.id !== body.author.id || typeof body.author.rev !== 'string' || creatorIdentityRev(c.id) !== body.author.rev) {
           throw new HttpError(409, 'The creator changed meanwhile; reload and try again');
         }
@@ -433,7 +434,7 @@ posts.patch(
       // The destination may have stopped being visible to this caller meanwhile.
       if (destId && !destinationVisible(req, destId)) return CHANGED;
       // A bound move commits only against the identity its caller checked.
-      if (boundRev !== null && destId && creatorIdentityRev(destId) !== boundRev) return CHANGED;
+      if (boundRev !== null && destId && (creatorIdentityRev(destId) !== boundRev || !profileReachable(req, destId))) return CHANGED;
       // A post inherits 18+ from its creator; moving it keeps that restriction on
       // the post itself. Only a moderator who saw the 18+ creator may lift it.
       const keepAdult = !!author && !!row.c_adult && !classifier;

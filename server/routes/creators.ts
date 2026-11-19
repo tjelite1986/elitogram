@@ -23,6 +23,22 @@ function limitedReachable(req: Request, creatorId: number): boolean {
     .get(creatorId, creatorId);
 }
 
+/**
+ * Could this caller open the creator's profile in its scope, as a full or a
+ * limited profile (loadCreator with allowLimited)? Asked by a post move bound
+ * by Grabbit's gateway, at its first read and in its commit, because limited
+ * reachability rests on mentions, which the identity sequence does not cover.
+ */
+export function profileReachable(req: Request, id: number): boolean {
+  const c = db.prepare('SELECT id, adult FROM creators WHERE id = ? AND deleted = 0').get(id) as { id: number; adult: number } | undefined;
+  if (!c) return false;
+  if (c.adult && !adultUnlocked(req)) return false;
+  const scope = scopeOf(req);
+  if (scope && !db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${creatorScopeSql(scope)}`).get(c.id) && !limitedReachable(req, c.id)) return false;
+  if (scope && !db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${mentionOriginVisibleSql(req)}`).get(c.id)) return false;
+  return true;
+}
+
 // allowLimited: only the read routes (profile, posts, mentioned) accept a limited
 // profile; every write (edit, pictures, follow, merge, delete) refuses it with 404.
 function loadCreator(req: Request, handle: string, { allowLimited = false } = {}): any {
@@ -289,7 +305,16 @@ creators.get('/creator-identities', (req, res) => {
   // Accounts have no other names; listed when they exist, whatever creator
   // shares the name.
   const accounts = [...new Set(usernames)].filter((u) => account.get(u));
-  res.set('Cache-Control', 'private, no-store').json({ items, accounts });
+  // The identity binding of every creator answered, read in the same step as
+  // its names: Grabbit's gateway requires it to equal the profile's binding.
+  const revs: Record<string, string> = {};
+  const live = db.prepare('SELECT id FROM creators WHERE handle = ? AND deleted = 0').pluck();
+  for (const h of Object.keys(items)) {
+    const id = live.get(h) as number | undefined;
+    const rev = id ? creatorIdentityRev(id) : null;
+    if (rev) revs[h] = rev;
+  }
+  res.set('Cache-Control', 'private, no-store').json({ items, accounts, revs });
 });
 
 creators.post('/creators-classify', requirePerm('profiles'), (req, res) => {

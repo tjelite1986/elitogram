@@ -108,6 +108,9 @@ async function main(): Promise<void> {
   const E = [1, 2, 3].map((i) => `smokerace-e${i}-${tag}`);
   // R9-01: bound moves (Grabbit's gateway sends { creator, id, rev }).
   const F = [1, 2, 3].map((i) => `smokerace-f${i}-${tag}`);
+  // R10-02: G is general, L is reachable in general only as a limited profile.
+  const G = `smokerace-g-${tag}`;
+  const L = `smokerace-l-${tag}`;
   let modId = 0;
   const memberName = `smokerace-m-${tag}`;
   const memberPass = `pass-${tag}-${Math.random().toString(36).slice(2)}`;
@@ -115,7 +118,7 @@ async function main(): Promise<void> {
   let memberId = 0;
   const member = new Client();
   try {
-    for (const h of [A, B, C, D, ...E, ...F]) check(`create creator ${h}`, (await admin.call('POST', '/api/creators', null, { handle: h })).status === 201);
+    for (const h of [A, B, C, D, ...E, ...F, G, L]) check(`create creator ${h}`, (await admin.call('POST', '/api/creators', null, { handle: h })).status === 201);
     const mk = await admin.call('POST', '/api/admin/users', null, { username: memberName, password: memberPass });
     memberId = mk.json?.id ?? 0;
     check('create member', mk.status === 201 && memberId > 0);
@@ -261,7 +264,7 @@ async function main(): Promise<void> {
     const p9 = await upload(admin, A, 1);
     posts.push(p9);
     const b9 = await bound(F[0]);
-    check('a creator answer carries identity_rev', typeof b9.rev === 'string' && /^[0-9a-f]{64}$/.test(b9.rev), String(b9.rev));
+    check('a creator answer carries identity_rev <id>.<seq>', typeof b9.rev === 'string' && b9.rev === `${b9.id}.${b9.rev.split('.')[1]}` && /^\d+\.\d+$/.test(b9.rev), String(b9.rev));
     const ok9 = await admin.call('PATCH', `/api/posts/${p9}`, null, { author: b9 });
     check('control: a fresh bound move succeeds', ok9.status === 200 && (await admin.get(`/api/posts/${p9}`)).json?.author?.handle === F[0], `${ok9.status} ${JSON.stringify(ok9.json)}`);
     // Checked F2, then F2 is merged into F3: its handle is now an alias of F3.
@@ -294,9 +297,41 @@ async function main(): Promise<void> {
     check('identity edit lands during the move', ed13.status === 200, `${ed13.status}`);
     check('the move answers 409', r13.status === 409, `${r13.status} ${JSON.stringify(r13.json)}`);
     check('the post is under A again, its file served', (await admin.get(`/api/posts/${p11}`)).json?.author?.handle === A && (await mediaServed(admin, p11)));
+
+    // --- R10-01: an identity edit and its revert never recreate the binding ---
+    const b14 = await bound(F[2]);
+    const had: string[] = (await admin.get(`/api/creators/${F[2]}`)).json?.aliases ?? [];
+    const alias = `smokealias-${tag}`;
+    check('alias added after the check', (await admin.call('PATCH', `/api/creators/${F[2]}`, null, { aliases: [...had, alias] })).status === 200);
+    check('alias removed again', (await admin.call('PATCH', `/api/creators/${F[2]}`, null, { aliases: had })).status === 200);
+    check('the alias list is back as it was', JSON.stringify((await admin.get(`/api/creators/${F[2]}`)).json?.aliases) === JSON.stringify(had));
+    const b14b = await bound(F[2]);
+    check('the binding moved on after edit + revert', b14b.rev !== b14.rev, `${b14.rev} -> ${b14b.rev}`);
+    const r14 = await admin.call('PATCH', `/api/posts/${p11}`, null, { author: b14 });
+    check('a bound move at the pre-edit binding answers 409', r14.status === 409, `${r14.status} ${JSON.stringify(r14.json)}`);
+    const idr = await admin.get(`/api/creator-identities?h=${F[2]}`);
+    check('creator-identities returns the same binding', idr.json?.revs?.[F[2]] === b14b.rev, JSON.stringify(idr.json?.revs));
+
+    // --- R10-02: a limited destination loses its last mention during the move --
+    check('classify G general', (await admin.call('POST', '/api/creators-classify', null, { audience: 'general', handles: [G] })).status === 200);
+    const q15 = await upload(admin, G, 1);
+    posts.push(q15);
+    check('mention L from a general post', (await admin.call('PATCH', `/api/posts/${q15}`, null, { caption: `hi @${L}` })).status === 200);
+    const p15 = await upload(admin, G, 1);
+    posts.push(p15);
+    const lim = (await admin.get(`/api/creators/${L}`, 'general')).json;
+    check('L opens as a limited profile in general', lim?.limited === true, JSON.stringify(lim)?.slice(0, 120));
+    const b15 = { creator: L, id: lim?.id, rev: lim?.identity_rev };
+    const move15 = admin.call('PATCH', `/api/posts/${p15}`, 'general', { author: b15 });
+    await wait(DURING_MS);
+    const ed15 = await admin2.call('PATCH', `/api/posts/${q15}`, null, { caption: 'no mention' });
+    const r15 = await move15;
+    check('the last mention goes during the move', ed15.status === 200, `${ed15.status}`);
+    check('the bound move to the no-longer-reachable L answers 409', r15.status === 409, `${r15.status} ${JSON.stringify(r15.json)}`);
+    check('the post stays under G', (await admin.get(`/api/posts/${p15}`)).json?.author?.handle === G);
   } finally {
     for (const id of posts) await admin.call('DELETE', `/api/posts/${id}`, null).catch(() => undefined);
-    for (const h of [A, B, C, D, ...E, ...F]) await admin.call('DELETE', `/api/creators/${h}`, null).catch(() => undefined);
+    for (const h of [A, B, C, D, ...E, ...F, G, L]) await admin.call('DELETE', `/api/creators/${h}`, null).catch(() => undefined);
     for (const uid of [memberId, modId]) if (uid) await admin.call('PATCH', `/api/admin/users/${uid}`, null, { disabled: true }).catch(() => undefined);
   }
   console.log(`\n${passes} passed, ${failures} failed`);

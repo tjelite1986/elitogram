@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { config } from './config.js';
@@ -578,21 +577,16 @@ export async function returnMediaHome(mediaIds: number[]): Promise<void> {
 }
 
 /**
- * A fingerprint of everything a caller may have judged a creator on: its id,
- * handle, deletion, classification, origin and every identity
- * (/api/creator-identities: aliases, sync handles, profile links). Grabbit's
- * gateway reads it with a creator's profile and binds a post move to it, so a
- * merge, rename, reclassification or identity change in between refuses the
- * move instead of landing it on a creator nobody checked. -> null when no such row.
+ * The binding of a creator for Grabbit's gateway: `<id>.<ident_seq>`. The
+ * sequence rises with every change to what the creator is judged on (handle,
+ * deletion, classification, origin, aliases, sync handles, links; schema
+ * triggers) and never repeats, so a merge, rename, reclassification or an
+ * identity edit and its revert all give a new value. It carries no hash of
+ * the fields themselves. -> null when no such row.
  */
 export function creatorIdentityRev(id: number): string | null {
-  const c = db.prepare('SELECT id, handle, deleted, adult, audience, origin, ig_handle, tiktok_handle, links FROM creators WHERE id = ?').get(id) as
-    | Record<string, unknown>
-    | undefined;
-  if (!c) return null;
-  const aliases = db.prepare('SELECT alias FROM creator_aliases WHERE creator_id = ? ORDER BY alias').pluck().all(id);
-  const facts = [c.id, c.handle, c.deleted, c.adult, c.audience, c.origin ?? null, c.ig_handle ?? null, c.tiktok_handle ?? null, c.links ?? null, aliases];
-  return crypto.createHash('sha256').update(JSON.stringify(facts)).digest('hex');
+  const seq = db.prepare('SELECT ident_seq FROM creators WHERE id = ?').pluck().get(id) as number | undefined;
+  return seq === undefined ? null : `${id}.${seq}`;
 }
 
 /** A live creator by its own handle only (never an alias). */
