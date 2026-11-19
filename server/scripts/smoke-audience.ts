@@ -52,8 +52,13 @@ async function main(): Promise<void> {
   check('login', login.status === 200 && !!cookie, `HTTP ${login.status}`);
 
   // Two non-adult creators with posts: A becomes general for the run, B stays unknown.
-  const list = await get('/api/creators');
-  const withPosts = (list.json?.items ?? []).filter((c: any) => !c.adult && c.post_count > 0 && c.audience !== 'general');
+  // Most creators are classified by now, so page until two unclassified ones turn up.
+  const withPosts: any[] = [];
+  for (let offset: number | null = 0; offset != null && withPosts.length < 2; ) {
+    const list = await get(`/api/creators${offset ? `?offset=${offset}` : ''}`);
+    withPosts.push(...(list.json?.items ?? []).filter((c: any) => !c.adult && c.post_count > 0 && c.audience !== 'general'));
+    offset = list.json?.next ?? null;
+  }
   check('two unclassified creators to work with', withPosts.length >= 2);
   const [A, B] = withPosts;
   const classify = await call('POST', '/api/creators-classify', null, { handles: [A.handle], audience: 'general' });
@@ -65,7 +70,9 @@ async function main(): Promise<void> {
     const fi = feed.json?.items ?? [];
     check('general feed has items', fi.length > 0);
     check('general feed is all general', fi.every((p: any) => p.audience === 'general'));
-    check("general feed includes A's posts", fi.some((p: any) => p.author?.handle === A.handle));
+    // The feed shows the newest posts only; A's own list shows A's posts in the scope.
+    const ap = (await get(`/api/creators/${A.handle}/posts`, 'general')).json?.items ?? [];
+    check("A's posts are listed in the general scope", ap.length > 0 && ap.every((t: any) => t.audience === 'general'));
     const ex = await get('/api/explore', 'general');
     check('general explore is all general', (ex.json?.items ?? []).every((t: any) => t.audience === 'general'));
     const cl = await get('/api/creators', 'general');
