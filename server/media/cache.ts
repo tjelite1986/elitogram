@@ -315,13 +315,18 @@ const pageQuery = db.prepare(
 
 type Todo = { id: number; path: string; kind: 'image' | 'video'; ident: string; done?: boolean; skip?: boolean };
 
-function hasThumb(key: string): boolean {
+// Asynchronous, so a slow disk never blocks other requests during discovery.
+async function hasThumb(key: string): Promise<boolean> {
   try {
-    return fs.lstatSync(mediaAbs(`${APP_DIRS.thumbs}/${key.slice(-2).padStart(2, '0')}/${key}_${REBUILD_WIDTH}.webp`)).isFile();
+    return (await fs.promises.lstat(mediaAbs(`${APP_DIRS.thumbs}/${key.slice(-2).padStart(2, '0')}/${key}_${REBUILD_WIDTH}.webp`))).isFile();
   } catch {
     return false;
   }
 }
+// How many thumbnail names discovery checks at once. Between two such
+// batches it checks the deadline and the cancel signal, so one page cannot
+// overrun the budget by much.
+const DISCOVERY_BATCH = 16;
 
 export function cacheRebuild(dryRun: boolean, cancel: Cancel = never, opts: RebuildOptions = {}) {
   const started = opts.startedAt ?? Date.now();
@@ -364,23 +369,44 @@ export function cacheRebuild(dryRun: boolean, cancel: Cancel = never, opts: Rebu
       const rows = pageQuery.all(below, page) as any[];
       pages++;
       let full = false;
-      for (const r of rows) {
-        below = r.id;
-        const ident = mediaIdentity(r);
-        if (hasThumb(`m${ident}`)) continue;
-        const m: Todo = { id: r.id, path: r.path, kind: r.kind, ident };
-        todo.push(m);
-        // Decided once: a parked thumbnail that finishes in the background
-        // during this call stays skipped here and is not counted as remaining.
-        if (isParked(m)) {
-          m.skip = true;
-          skipped++;
+      let stopped = false;
+      for (let i = 0; i < rows.length && !full; i += DISCOVERY_BATCH) {
+        // The first batch of a call always runs, so every call moves the
+        // cursor on; after that the page stops where the time runs out, and
+        // the cursor names the first row that was not looked at.
+        if (pages > 1 || i > 0) {
+          if (cancel.cancelled()) {
+            discoveryStop = 'disconnected';
+            stopped = true;
+            break;
+          }
+          if (Date.now() - started >= budget / 2) {
+            discoveryStop = 'time';
+            stopped = true;
+            break;
+          }
         }
-        else if (++work >= REBUILD_LIMIT && !dryRun) {
-          full = true;
-          break;
+        const batch = rows.slice(i, i + DISCOVERY_BATCH).map((r) => ({ r, ident: mediaIdentity(r) }));
+        const has = await Promise.all(batch.map((b) => hasThumb(`m${b.ident}`)));
+        for (let j = 0; j < batch.length; j++) {
+          const { r, ident } = batch[j];
+          below = r.id;
+          if (has[j]) continue;
+          const m: Todo = { id: r.id, path: r.path, kind: r.kind, ident };
+          todo.push(m);
+          // Decided once: a parked thumbnail that finishes in the background
+          // during this call stays skipped here and is not counted as remaining.
+          if (isParked(m)) {
+            m.skip = true;
+            skipped++;
+          }
+          else if (++work >= REBUILD_LIMIT && !dryRun) {
+            full = true;
+            break;
+          }
         }
       }
+      if (stopped) break;
       if (!full && rows.length < page) below = null;
     }
     const discoveryIncomplete = below !== null;

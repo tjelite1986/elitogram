@@ -149,6 +149,10 @@ fs.symlinkSync(victim, path.join(media, `${out10}.${process.pid}.tmp`));
 process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS = '0';
 const none = await call('POST', 'cache/rebuild', { dryRun: false });
 expect('zero budget: makes nothing, answers a cursor', none.status === 200 && none.stoppedEarly === true && none.stopReason === 'time' && none.made === 0 && none.remaining > 0 && typeof none.cursor === 'string');
+// Round 6: discovery checks the deadline inside a page too. With no time left
+// it looks at one batch of 16 names (of a 500-row page) and hands back the
+// cursor of the first row it did not look at.
+expect('zero budget: stops inside the page after one batch', none.discoveryIncomplete === true && none.missing > 0 && none.missing <= 16);
 // A small time budget: the call answers with part of the work and says how
 // much is left. The walk's own time varies, so grow the budget until a call
 // gets past discovery.
