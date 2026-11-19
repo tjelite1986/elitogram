@@ -121,6 +121,7 @@ async function main(): Promise<void> {
     check('control: its media are served', await mediaServed(member, p0));
 
     // --- A moderator's stale adult:false cannot clear a concurrent 18+ mark ------
+    // The admin has not unlocked 18+, so an 18+ post is simply not found for it.
     const p1 = await upload(admin, A, 1);
     posts.push(p1);
     const stale1 = admin.call('PATCH', `/api/posts/${p1}`, null, { author: { creator: B }, adult: false, caption: 'stale' });
@@ -129,10 +130,23 @@ async function main(): Promise<void> {
     const r1 = await stale1;
     check('concurrent 18+ mark lands', mark.status === 200, `${mark.status} ${JSON.stringify(mark.json)}`);
     check('the stale moderator edit answers 409', r1.status === 409, `${r1.status} ${JSON.stringify(r1.json)}`);
-    const after1 = (await admin.get(`/api/posts/${p1}`)).json;
-    check('the post stays 18+', after1?.adult === true, JSON.stringify(after1?.adult));
-    check('the post stays under A', after1?.author?.handle === A);
-    check('the stale caption was not written', after1?.caption === 'smoke races');
+    check('the post stays 18+ (not found while locked)', (await admin.get(`/api/posts/${p1}`)).status === 404);
+    for (const sc of ['general', 'unknown'] as const) check(`the post is not in the ${sc} scope`, (await admin.get(`/api/posts/${p1}`, sc)).status === 404);
+
+    // --- A moderator's stale audience cannot overwrite a newer classification ----
+    const p1b = await upload(admin, A, 1);
+    posts.push(p1b);
+    const stale1b = admin.call('PATCH', `/api/posts/${p1b}`, null, { author: { creator: B }, audience: 'unknown', caption: 'stale' });
+    await wait(DURING_MS);
+    const cls = await admin2.call('PATCH', `/api/posts/${p1b}`, null, { audience: 'general' });
+    const r1b = await stale1b;
+    check('concurrent classification lands', cls.status === 200, `${cls.status}`);
+    check('the stale audience edit answers 409', r1b.status === 409, `${r1b.status}`);
+    const after1b = (await admin.get(`/api/posts/${p1b}`)).json;
+    check('the newer classification stays', after1b?.audience === 'general', JSON.stringify(after1b?.audience));
+    check('the post stays under A', after1b?.author?.handle === A);
+    check('the stale caption was not written', after1b?.caption === 'smoke races');
+    check('its media are served after the move back', await mediaServed(admin, p1b));
 
     // --- The destination turns 18+ while the files move ------------------------
     const p2 = await upload(member, '', 1);
@@ -171,18 +185,21 @@ async function main(): Promise<void> {
     check('the post is under B', (await admin.get(`/api/posts/${p4}`)).json?.author?.handle === B);
     check('all its media are served', await mediaServed(admin, p4));
 
-    // --- Removing an item while the post is marked 18+ meanwhile -----------------
+    // --- Removing an item while the creator is declassified meanwhile ----------
     const p5 = await upload(admin, A, 2);
     posts.push(p5);
     check('A classified general for the removal case', (await admin.call('PATCH', `/api/creators/${A}`, null, { audience: 'general' })).status === 200);
     const m5: number[] = ((await admin.get(`/api/posts/${p5}`)).json?.media ?? []).map((m: any) => m.id);
-    const rm = admin.call('PATCH', `/api/posts/${p5}`, null, { author: { creator: C }, adult: false, removeMedia: [m5[1]] });
+    const rm = admin.call('PATCH', `/api/posts/${p5}`, null, { author: { creator: B }, removeMedia: [m5[1]] });
     await wait(DURING_MS);
-    await admin2.call('PATCH', `/api/posts/${p5}`, null, { adult: true });
+    const declass = await admin2.call('PATCH', `/api/creators/${A}`, null, { audience: 'unknown' });
     const r5 = await rm;
-    check('the stale removal answers 409', r5.status === 409, `${r5.status}`);
+    check('A declassified meanwhile', declass.status === 200, `${declass.status}`);
+    check('the stale removal answers 409', r5.status === 409, `${r5.status} ${JSON.stringify(r5.json)}`);
     check('both items stay on the post', ((await admin.get(`/api/posts/${p5}`)).json?.media ?? []).length === 2);
-    check('the removed-to-be item is not general', (await member.get(`/m/${m5[1]}`, 'general')).status === 404);
+    check('the post is under A again', (await admin.get(`/api/posts/${p5}`)).json?.author?.handle === A);
+    check('the item is not general', (await member.get(`/m/${m5[1]}`, 'general')).status === 404);
+    check('its media are served after the move back', await mediaServed(admin, p5));
   } finally {
     for (const id of posts) await admin.call('DELETE', `/api/posts/${id}`, null).catch(() => undefined);
     for (const h of [A, B, C]) await admin.call('DELETE', `/api/creators/${h}`, null).catch(() => undefined);
