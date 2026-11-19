@@ -94,11 +94,17 @@ export type MentionPlan =
  *    platforms are never merged by a mention). One known for the name only
  *    as the OTHER platform's account may be someone else: a separate mention
  *    creator is planned (step 4 applies).
- * 4. Before a new creator is planned: a deleted creator holding the name as
+ * 4. A name no Instagram or TikTok account can have (it contains "-", as every
+ *    generated "u-" handle does) is never an account spelling: it links only
+ *    to a normal creator (not origin 'mention') holding it as handle or
+ *    alias, else it is skipped ('invalid') and never creates one. Otherwise a
+ *    General caption writing "@u-sam" would reach the creator made for an
+ *    18+ "@__sam" and expose that spelling.
+ * 5. Before a new creator is planned: a deleted creator holding the name as
  *    handle or alias, or as the account on the post's platform (either
  *    platform when unknown), skips it ('deleted'), so a deleted "u-sam" for
  *    TikTok @sam is not recreated as "u-sam-2". A live owner found in steps
- *    1-3 is linked first, whatever tombstone shares the name.
+ *    1-4 is linked first, whatever tombstone shares the name.
  */
 export function planMention(name: string, platform: Platform, authorId: number | null): MentionPlan {
   const n = name.toLowerCase();
@@ -125,10 +131,12 @@ export function planMention(name: string, platform: Platform, authorId: number |
   }
   const acct = col ? `c.${col}` : 'NULL';
   const other = otherCol ? `c.${otherCol}` : 'NULL';
-  const hit = (db.prepare(`SELECT c.id, ${acct} AS acct, ${other} AS other FROM creators c WHERE c.handle = ? AND c.deleted = 0`).get(n) ??
-    db.prepare(`SELECT c.id, ${acct} AS acct, ${other} AS other FROM creator_aliases a JOIN creators c ON c.id = a.creator_id WHERE a.alias = ? AND c.deleted = 0`).get(n)) as
-    | { id: number; acct: string | null; other: string | null }
+  const hit = (db.prepare(`SELECT c.id, c.origin, ${acct} AS acct, ${other} AS other FROM creators c WHERE c.handle = ? AND c.deleted = 0`).get(n) ??
+    db.prepare(`SELECT c.id, c.origin, ${acct} AS acct, ${other} AS other FROM creator_aliases a JOIN creators c ON c.id = a.creator_id WHERE a.alias = ? AND c.deleted = 0`).get(n)) as
+    | { id: number; origin: string | null; acct: string | null; other: string | null }
     | undefined;
+  // Not an account spelling (step 4): a normal creator only, never a new one.
+  if (n.includes('-')) return hit && hit.origin !== 'mention' ? link(hit.id) : { name: n, action: 'skip', reason: 'invalid' };
   if (!platform) {
     // Every distinct live claimant of the name, checked before any of them is taken.
     const claimants = new Set(
