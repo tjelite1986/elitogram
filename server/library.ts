@@ -619,7 +619,9 @@ export function emptyBackfillStats(): BackfillStats {
 export class BackfillStopped extends Error {}
 
 /**
- * One batch of the backfill: the next `limit` live posts after `afterId`, by id.
+ * One batch of the backfill: the next `limit` live posts after `afterId`, by id
+ * (apply: after the stored checkpoint when that is further, read in the
+ * write transaction, so concurrent runners never move it backward).
  * Dry run (apply = false) reads only and counts what applying would write;
  * `seen` carries names, tags and creators across batches so nothing is counted
  * twice. Apply reads the batch and writes it in one write transaction (BEGIN
@@ -714,18 +716,21 @@ export function metadataBackfillBatch(
       for (const id of have) if (!want.has(`c:${id}`)) stats.removedRelations++;
     }
   };
-  const select = () =>
-    db.prepare('SELECT id, caption, creator_id, source_url, meta FROM posts WHERE id > ? AND deleted = 0 ORDER BY id LIMIT ?').all(afterId, limit) as Row[];
+  const select = (from: number) =>
+    db.prepare('SELECT id, caption, creator_id, source_url, meta FROM posts WHERE id > ? AND deleted = 0 ORDER BY id LIMIT ?').all(from, limit) as Row[];
   if (!apply) {
-    const rows = select();
+    const rows = select(afterId);
     rows.forEach(one);
     return rows.length;
   }
   let failed: { id: number; message: string } | null = null;
   const read = db
     .transaction(() => {
-      const rows = select();
-      const start = stats.lastId;
+      // Another runner (the job and the CLI) may have moved the checkpoint past
+      // this one's cursor: start after the larger, so it never moves backward.
+      const persisted = Number(db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get(BACKFILL_CURSOR_KEY) ?? 0) || 0;
+      const from = Math.max(afterId, persisted);
+      const rows = select(from);
       for (const p of rows) {
         const before = { ...stats, skipped: { ...stats.skipped } };
         const reusedBefore = new Set(seen.reused);
@@ -740,7 +745,7 @@ export function metadataBackfillBatch(
           break;
         }
       }
-      if (stats.lastId > start && stats.lastId > afterId) {
+      if (rows.length && stats.lastId > from) {
         db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(BACKFILL_CURSOR_KEY, String(stats.lastId));
       }
       return rows.length;
