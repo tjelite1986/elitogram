@@ -232,18 +232,27 @@ posts.get('/posts/:id', (req, res) => {
  */
 const seesAdult = (req: Request): boolean => !isScoped(req) && adultUnlocked(req);
 
+/**
+ * May this caller see creator `id` as a destination? Not 18+ unless the caller
+ * sees 18+, and in a scope not a creator made for an @name that the scope shows
+ * no post of (mentionOriginVisibleSql): to a Review caller a creator known only
+ * from an 18+ caption must answer exactly like a name that matches nothing.
+ */
+function destinationVisible(req: Request, id: number): boolean {
+  if (seesAdult(req)) return true;
+  if (db.prepare('SELECT adult FROM creators WHERE id = ?').pluck().get(id)) return false;
+  return !isScoped(req) || !!db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${mentionOriginVisibleSql(req)}`).get(id);
+}
+
 /** A creator by handle or alias, as far as this caller may see it. */
 function findDestinationCreator(req: Request, name: string): { id: number; handle: string } | undefined {
   const c = findCreatorByName(name);
-  if (!c || seesAdult(req)) return c;
-  const adult = db.prepare('SELECT adult FROM creators WHERE id = ?').pluck().get(c.id);
-  return adult ? undefined : c;
+  return c && destinationVisible(req, c.id) ? c : undefined;
 }
 
-/** Asked again at insert time: the destination may have become 18+ meanwhile. */
+/** Asked again at insert time: the destination may have become 18+ or hidden meanwhile. */
 function assertDestinationStillVisible(req: Request, creatorId: number | null, name: string): void {
-  if (!creatorId || seesAdult(req)) return;
-  if (db.prepare('SELECT adult FROM creators WHERE id = ?').pluck().get(creatorId)) throw new HttpError(400, `Unknown creator "${name}"`);
+  if (creatorId && !destinationVisible(req, creatorId)) throw new HttpError(400, `Unknown creator "${name}"`);
 }
 
 function resolveAuthor(req: Request, fields: Record<string, string>): Author {
@@ -406,6 +415,8 @@ posts.patch(
     const removed: number[] = [];
     const commit = db.transaction((): string | null => {
       if (editState(id, destId, req.user!.id) !== before) return CHANGED;
+      // The destination may have stopped being visible to this caller meanwhile.
+      if (destId && !destinationVisible(req, destId)) return CHANGED;
       // A post inherits 18+ from its creator; moving it keeps that restriction on
       // the post itself. Only a moderator who saw the 18+ creator may lift it.
       const keepAdult = !!author && !!row.c_adult && !classifier;

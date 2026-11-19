@@ -179,6 +179,21 @@ async function main(): Promise<void> {
     check('review: @-suggestions do not offer it', au.status === 200 && !(au.json?.items ?? []).some((x: any) => x.handle === adultOnly));
     const lu = await get(`/api/creators?q=${adultOnly}`, 'unknown');
     check('review: the creator list search does not find it', lu.status === 200 && !(lu.json?.items ?? []).some((x: any) => x.handle === adultOnly));
+    // Naming it as an upload destination in Review answers like a name nobody has.
+    const upload = async (creator: string) => {
+      const form = new FormData();
+      form.set('creator', creator);
+      form.set('caption', 'smoke destination probe');
+      form.set('files', new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }), 'probe.jpg');
+      const r = await fetch(`${BASE}/api/posts`, { method: 'POST', headers: { Origin: BASE, Cookie: cookieHeader(), 'X-Egram-Audience': 'unknown' }, body: form });
+      const json: any = await r.json().catch(() => null);
+      // A post made here would mean the check failed; do not leave it behind.
+      if (json?.id) await call('DELETE', `/api/posts/${json.id}`, null);
+      return { status: r.status, error: String(json?.error ?? '').replace(creator, '<name>') };
+    };
+    const dh = await upload(adultOnly);
+    const dn = await upload(`nosuch${tag}`);
+    check('review: as upload destination it answers like a missing name', dh.status === 400 && dh.status === dn.status && dh.error === dn.error, `${dh.status} ${dh.error} / ${dn.status} ${dn.error}`);
     const cun = await get(`/api/creators/${adultOnly}`);
     check('unscoped: the creator exists', cun.status === 200 && cun.json?.origin === 'mention', `HTTP ${cun.status}`);
     const ht = await get(`/api/hashtags/smokeadult${tag}`, 'general');

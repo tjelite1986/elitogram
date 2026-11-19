@@ -80,17 +80,18 @@ export function mentionTargetSql(req: Request, alias = 'c'): string {
 
 /**
  * SQL condition on a creator row `alias`: a creator made for an @name
- * (origin = 'mention') that owns no live post exists in a scope only through a
- * post that same scope shows mentioning it. Without it, Review would offer a
+ * (origin = 'mention') exists in a scope only through a post that same scope
+ * shows: one it owns, or one that mentions it. Without it, Review would offer a
  * creator known only from an 18+ caption (it starts unclassified and not
- * 18+). Every creator read and discovery path a scoped request reaches applies
- * it; unscoped requests are unaffected. The subquery is uncorrelated (the
- * visible() aliases p, c and u are its own), so SQLite evaluates it once.
+ * 18+), or one whose only own post is 18+. Every creator read, discovery and
+ * destination path a scoped request reaches applies it; unscoped requests are
+ * unaffected. The subqueries are uncorrelated (the visible() aliases p, c and
+ * u are their own), so SQLite evaluates each once.
  */
 export function mentionOriginVisibleSql(req: Request, alias = 'c'): string {
   if (!scopeOf(req)) return '1=1';
   return `(COALESCE(${alias}.origin, '') <> 'mention'
-    OR EXISTS (SELECT 1 FROM posts pov WHERE pov.creator_id = ${alias}.id AND pov.deleted = 0)
+    OR ${alias}.id IN (SELECT p.creator_id ${POST_FROM} WHERE p.creator_id IS NOT NULL AND ${visible(req)})
     OR ${alias}.id IN (SELECT pmv.creator_id FROM post_mentions pmv ${POST_FROM.replace('FROM posts p', 'JOIN posts p ON p.id = pmv.post_id')} WHERE ${visible(req)}))`;
 }
 
