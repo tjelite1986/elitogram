@@ -15,6 +15,7 @@ import { stories } from './routes/stories.js';
 import { social } from './routes/social.js';
 import { media } from './routes/media.js';
 import { admin } from './routes/admin.js';
+import { dedupe } from './routes/dedupe.js';
 import { refuseScoped } from './audience.js';
 import { registerJob, startScheduler, warnIfBackupDisabled } from './jobs/scheduler.js';
 import { runImport } from './jobs/importer.js';
@@ -55,6 +56,9 @@ app.use((_req, res, next) => {
   );
   next();
 });
+// Grabbit's dedupe routes authenticate by their own token and never by a
+// session, so they sit before the cookie, session and origin middleware.
+app.use('/api/dedupe/v1', express.json({ limit: '1mb' }), dedupe);
 app.use(cookieParser());
 app.use(sessionMiddleware);
 app.use(originCheck);
