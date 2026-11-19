@@ -59,5 +59,8 @@ export const config = {
   tiktokMaxPostsPerRun: Number(env('TIKTOK_MAX_POSTS_PER_RUN', '20')),
   // Files in the import folder younger than this are still being uploaded.
   importMinAgeSec: Number(env('IMPORT_MIN_AGE_SEC', '120')),
+  // Test only (smoke-races.ts): a pause after a reassignment moved its files, so
+  // a test can change the post meanwhile. 0 (the default) means no pause.
+  testMoveDelayMs: Math.max(0, Math.min(10000, Number(env('TEST_MOVE_DELAY_MS', '0')) || 0)),
   staticDir: path.resolve(env('STATIC_DIR', './dist/client')),
 };

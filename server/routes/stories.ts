@@ -4,7 +4,7 @@ import { adultUnlocked, can } from '../auth.js';
 import { parseClassify, scopeOf } from '../audience.js';
 import { ah, HttpError, intParam } from '../http.js';
 import { parseUpload } from '../media/upload.js';
-import { APP_DIRS, mediaRel, moveFile, sniffFile, uniqueTarget } from '../media/files.js';
+import { APP_DIRS, mediaRel, placeFile, sniffFile } from '../media/files.js';
 import { notify } from '../notify.js';
 
 export const stories = Router();
@@ -45,8 +45,7 @@ stories.post(
       if (!f) throw new HttpError(400, 'No file');
       const s = await sniffFile(f.abs);
       if (!s) throw new HttpError(400, 'Not a supported image or video');
-      const dest = await uniqueTarget(`${APP_DIRS.stories}/${req.user!.id}`, `story_${Date.now()}`, s.ext);
-      await moveFile(f.abs, dest);
+      const dest = await placeFile(f.abs, `${APP_DIRS.stories}/${req.user!.id}`, `story_${Date.now()}`, s.ext);
       // 'adult' (either field) marks the story 18+. Marking it general is
       // classification: only a moderator (profiles) or an admin may.
       const asked = parseClassify(up.fields.audience);

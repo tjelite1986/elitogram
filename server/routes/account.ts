@@ -6,7 +6,7 @@ import {
 import { ah, HttpError, intParam, str } from '../http.js';
 import { POST_FROM, visible, parseCursor, cursorSql, nextCursor, gridTiles } from '../views.js';
 import { parseUpload } from '../media/upload.js';
-import { APP_DIRS, mediaRel, moveFile, sniffFile, uniqueTarget } from '../media/files.js';
+import { APP_DIRS, mediaRel, placeFile, sniffFile } from '../media/files.js';
 import { vapidPublicKey } from '../notify.js';
 import { creatorScopeSql, isScoped, scopeOf } from '../audience.js';
 
@@ -108,8 +108,7 @@ account.post(
       if (!f) throw new HttpError(400, 'No file');
       const s = await sniffFile(f.abs);
       if (!s || s.kind !== 'image') throw new HttpError(400, 'Not an image');
-      const dest = await uniqueTarget(APP_DIRS.avatars, `u${req.user!.id}_${Date.now()}`, s.ext);
-      await moveFile(f.abs, dest);
+      const dest = await placeFile(f.abs, APP_DIRS.avatars, `u${req.user!.id}_${Date.now()}`, s.ext);
       db.prepare('UPDATE users SET avatar_path = ? WHERE id = ?').run(mediaRel(dest), req.user!.id);
       res.json({ ok: true });
     } finally {

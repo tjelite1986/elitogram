@@ -5,7 +5,7 @@ import { ah, HttpError, intParam, str } from '../http.js';
 import { creatorScopeSql, effectiveAudience, isScoped, parseClassify, scopeOf, scopeSql } from '../audience.js';
 import { POST_COLS, POST_FROM, visible, parseCursor, cursorSql, nextCursor, hydratePosts, gridTiles } from '../views.js';
 import { parseUpload } from '../media/upload.js';
-import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, parseMentions, setPostHashtags, type Author } from '../library.js';
+import { addMediaToPost, createPost, currentPostAudience, findCreatorByName, indexPost, moveMediaToAuthor, parseMentions, setPostHashtags, withMoveLock, type Author } from '../library.js';
 import { notify, notifyFollowers } from '../notify.js';
 
 export const posts = Router();
@@ -329,6 +329,27 @@ posts.post(
 );
 
 
+/** Message for a PATCH whose post changed between its checks and its commit. */
+const CHANGED = 'The post changed while it was being edited; reload it and try again';
+
+/**
+ * Everything a post edit is decided on: the post's 18+ flag, audience,
+ * deletion and author, its creator's classification, its media list, and the
+ * destination creator's classification and deletion. PATCH reads it with its
+ * checks and compares it again inside the commit transaction.
+ */
+function editState(postId: number, destCreatorId: number | null): string {
+  const p = db
+    .prepare(
+      `SELECT p.adult, p.audience, p.deleted, p.creator_id, p.user_id, c.adult AS c_adult, c.audience AS c_audience, c.deleted AS c_deleted,
+              (SELECT COUNT(*) FROM media m WHERE m.post_id = p.id) AS n, (SELECT MAX(m.id) FROM media m WHERE m.post_id = p.id) AS last
+       FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.id = ?`,
+    )
+    .get(postId);
+  const d = destCreatorId ? db.prepare('SELECT adult, audience, deleted FROM creators WHERE id = ?').get(destCreatorId) : null;
+  return JSON.stringify([p ?? null, d ?? null]);
+}
+
 posts.patch(
   '/posts/:id',
   ah(async (req, res) => {
@@ -365,29 +386,23 @@ posts.patch(
 
     // Resubmitting the current author is no reassignment.
     if (author && (author.creatorId ? author.creatorId === row.creator_id : !row.creator_id && author.userId === row.user_id)) author = null;
-    // Files move first (slow, outside any transaction). Every write of this
-    // request then lands in one transaction, checked again against the post as
-    // it is now: a moderator may have marked it (or its creator) 18+, an import
-    // may have held it for review, or the destination may have been classified
-    // general while the files moved. A refused request writes nothing and the
-    // files move back.
-    if (author) await moveMediaToAuthor([id], author);
+    // Every check above was made against this state, read in the same
+    // synchronous step as `row`. Files move first (slow, outside any
+    // transaction); then every write of this request lands in one transaction
+    // that first compares the state again. If anything it rests on changed
+    // meanwhile (18+ or audience of the post or its creator, an importer hold,
+    // the destination's classification or deletion, the media list), the
+    // request writes nothing, gets 409, and the files go back to the author
+    // the post has now. This holds for moderators too: a stale request never
+    // overwrites a newer classification.
+    const destId = author?.creatorId ?? null;
+    const before = editState(id, destId);
     const caption = typeof body.caption === 'string' ? str(body.caption) : null;
-    const refusal = db.transaction((): string | null => {
-      const cur = db
-        .prepare('SELECT p.adult, p.audience, COALESCE(c.adult, 0) AS c_adult FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.id = ?')
-        .get(id) as { adult: number; audience: string; c_adult: number } | undefined;
-      if (!cur) return 'Post not found';
-      if (!classifier && body.adult === false && cur.adult) return 'Only a moderator can lift 18+';
-      if (!classifier && audience && audience !== 'adult' && audience !== cur.audience) return 'Only a moderator can classify posts';
+    const commit = db.transaction((): string | null => {
+      if (editState(id, destId) !== before) return CHANGED;
       // A post inherits 18+ from its creator; moving it keeps that restriction on
       // the post itself. Only a moderator who saw the 18+ creator may lift it.
-      const keepAdult = !!author && !!cur.c_adult && (!classifier || !row.c_adult);
-      if (author && !classifier && author.creatorId) {
-        const dest = db.prepare('SELECT audience FROM creators WHERE id = ?').pluck().get(author.creatorId);
-        const adultAfter = !!cur.adult || keepAdult || body.adult === true || audience === 'adult';
-        if (dest === 'general' && !adultAfter) return 'Only a moderator can post under a creator classified general; mark the post 18+ or ask a moderator';
-      }
+      const keepAdult = !!author && !!row.c_adult && !classifier;
       if (author) db.prepare('UPDATE posts SET creator_id = ?, user_id = ? WHERE id = ?').run(author.creatorId ?? null, author.creatorId ? null : author.userId, id);
       if (caption !== null) {
         db.prepare('UPDATE posts SET caption = ? WHERE id = ?').run(caption, id);
@@ -398,34 +413,23 @@ posts.patch(
       // 'adult' sets the 18+ flag; general/unknown only change the audience and never clear 18+.
       if (audience === 'adult') db.prepare('UPDATE posts SET adult = 1 WHERE id = ?').run(id);
       else if (audience) db.prepare('UPDATE posts SET audience = ? WHERE id = ?').run(audience, id);
-      return null;
-    })();
-    if (refusal) {
-      if (author) {
-        const back: Author = row.creator_id ? { creatorId: row.creator_id } : { userId: row.user_id };
-        await moveMediaToAuthor([id], back).catch((err) => console.error(`Could not move the files of post ${id} back: ${(err as Error).message}`));
-      }
-      throw new HttpError(refusal === 'Post not found' ? 404 : 403, refusal);
-    }
-    if (caption !== null) notifyMentions(caption, req.user!, id, 'post');
-    if (toRemove.length) {
-      // Removed media move to a new hidden, deleted post so the file and its row stay recoverable.
-      db.transaction(() => {
-        // The holder keeps the post's owner and takes the stricter classification of
-        // before this edit and after it: 18+ if either was, general only if both were.
-        // Read back from the database, since this same request may just have marked it 18+.
+      if (toRemove.length) {
+        // Removed media move to a new hidden, deleted post so the file and its row
+        // stay recoverable. The holder keeps the post's owner and takes the
+        // stricter classification of before this edit (`row`, unchanged up to
+        // this transaction) and after it: 18+ if either was, general only if both were.
         const cur = db
           .prepare('SELECT p.adult, p.audience, c.adult AS c_adult, c.audience AS c_audience FROM posts p LEFT JOIN creators c ON c.id = p.creator_id WHERE p.id = ?')
           .get(id) as { adult: number; audience: string; c_adult: number | null; c_audience: string | null };
-        const before = effectiveAudience(row);
-        const after = effectiveAudience(cur);
-        const adult = before === 'adult' || after === 'adult' ? 1 : 0;
+        const was = effectiveAudience(row);
+        const is = effectiveAudience(cur);
+        const adult = was === 'adult' || is === 'adult' ? 1 : 0;
         // The holder keeps the original creator, so 'unknown' would let it inherit
         // general from that creator. It does so only when the post was shown as
         // general both before and after; otherwise (held for review, or not
         // general on either side) it is held for review itself.
         const holderAudience =
-          row.audience === 'general' && cur.audience === 'general' ? 'general' : before === 'general' && after === 'general' ? 'unknown' : 'review';
+          row.audience === 'general' && cur.audience === 'general' ? 'general' : was === 'general' && is === 'general' ? 'unknown' : 'review';
         const t = now();
         const holder = db
           .prepare(
@@ -434,8 +438,28 @@ posts.patch(
           .run(row.creator_id, row.user_id, req.user!.id, `Removed from post ${id}`, row.created_at, t, t, adult, holderAudience);
         const upd = db.prepare('UPDATE media SET post_id = ? WHERE id = ? AND post_id = ?');
         for (const mid of toRemove) upd.run(Number(holder.lastInsertRowid), mid, id);
-      })();
-    }
+      }
+      return null;
+    });
+    let refusal: string | null;
+    if (author) {
+      const dest = author;
+      refusal = await withMoveLock(async () => {
+        await moveMediaToAuthor([id], dest);
+        const r = commit();
+        if (r) {
+          // This request wrote nothing: the files go to the author the post has now.
+          const now_ = db.prepare('SELECT creator_id, user_id FROM posts WHERE id = ?').get(id) as { creator_id: number | null; user_id: number | null } | undefined;
+          if (now_) {
+            const back: Author = now_.creator_id ? { creatorId: now_.creator_id } : { userId: now_.user_id };
+            await moveMediaToAuthor([id], back).catch((err) => console.error(`Could not move the files of post ${id} back: ${(err as Error).message}`));
+          }
+        }
+        return r;
+      });
+    } else refusal = commit();
+    if (refusal) throw new HttpError(refusal === CHANGED ? 409 : 404, refusal);
+    if (caption !== null) notifyMentions(caption, req.user!, id, 'post');
     if (Array.isArray(body.order)) {
       const upd = db.prepare('UPDATE media SET position = ? WHERE id = ? AND post_id = ?');
       db.transaction(() => (body.order as unknown[]).forEach((mid, i) => upd.run(i, Number(mid), id)))();

@@ -5,8 +5,8 @@ import { ah, HttpError, str } from '../http.js';
 import { creatorScopeSql, parseClassify, refuseScoped, scopeOf, scopeSql } from '../audience.js';
 import { parseCursor, cursorSql, nextCursor, gridTiles, POST_FROM, visible } from '../views.js';
 import { parseUpload } from '../media/upload.js';
-import { APP_DIRS, isReservedName, mediaRel, sniffFile, uniqueTarget, moveFile, validateHandle } from '../media/files.js';
-import { createCreator, findCreatorByName, MediaRejected, moveMediaToAuthor, reindexCreator } from '../library.js';
+import { APP_DIRS, isReservedName, mediaRel, placeFile, sniffFile, validateHandle } from '../media/files.js';
+import { createCreator, findCreatorByName, MediaRejected, moveMediaToAuthor, reindexCreator, withMoveLock } from '../library.js';
 import { notify } from '../notify.js';
 
 export const creators = Router();
@@ -324,8 +324,7 @@ async function storeImage(req: Request, dir: string, prefix: string): Promise<st
     if (!f) throw new HttpError(400, 'No file');
     const s = await sniffFile(f.abs);
     if (!s || s.kind !== 'image') throw new HttpError(400, 'Not an image');
-    const dest = await uniqueTarget(dir, `${prefix}_${Date.now()}`, s.ext);
-    await moveFile(f.abs, dest);
+    const dest = await placeFile(f.abs, dir, `${prefix}_${Date.now()}`, s.ext);
     return mediaRel(dest);
   } finally {
     await up.cleanup();
@@ -395,31 +394,35 @@ creators.post(
     const from = loadCreator(req, str(req.body?.from, 80));
     const into = loadCreator(req, str(req.body?.into, 80));
     if (from.id === into.id) throw new HttpError(400, 'Pick two different profiles');
-    const postIds = db.prepare('SELECT id FROM posts WHERE creator_id = ?').pluck().all(from.id) as number[];
-    await moveMediaToAuthor(postIds, { creatorId: into.id });
-    db.transaction(() => {
-      // The source is read again here: it may have been classified (18+ or
-      // general) while the files were moving, and the merged profile must carry
-      // its current classification, not the snapshot taken before the move.
-      const cur = db.prepare('SELECT * FROM creators WHERE id = ?').get(from.id) as any;
-      if (cur) Object.assign(from, cur);
-      db.prepare('UPDATE posts SET creator_id = ? WHERE creator_id = ?').run(into.id, from.id);
-      db.prepare('UPDATE creator_aliases SET creator_id = ? WHERE creator_id = ?').run(into.id, from.id);
-      db.prepare('INSERT OR IGNORE INTO creator_aliases (alias, creator_id) VALUES (?, ?)').run(from.handle, into.id);
-      db.prepare('INSERT OR IGNORE INTO follows (user_id, creator_id, created_at) SELECT user_id, ?, created_at FROM follows WHERE creator_id = ?').run(into.id, from.id);
-      db.prepare('DELETE FROM follows WHERE creator_id = ?').run(from.id);
-      db.prepare(
-        `UPDATE creators SET
-           ig_handle = COALESCE(ig_handle, ?), tiktok_handle = COALESCE(tiktok_handle, ?),
-           avatar_source = CASE WHEN avatar_path IS NULL THEN ? ELSE avatar_source END, banner_source = CASE WHEN banner_path IS NULL THEN ? ELSE banner_source END,
-           avatar_path = COALESCE(avatar_path, ?), banner_path = COALESCE(banner_path, ?),
-           bio = CASE WHEN bio = '' THEN ? ELSE bio END, adult = MAX(adult, ?),
-           audience = CASE WHEN audience = 'general' OR ? = 'general' THEN 'general' ELSE audience END
-         WHERE id = ?`,
-      ).run(from.ig_handle, from.tiktok_handle, from.avatar_source, from.banner_source, from.avatar_path, from.banner_path, from.bio, from.adult, from.audience, into.id);
-      // The emptied profile keeps its row (soft-deleted), but its handle is freed to live on as an alias.
-      db.prepare("UPDATE creators SET deleted = 1, ig_autopoll = 0, tiktok_autopoll = 0, handle = handle || '~merged' || id WHERE id = ?").run(from.id);
-    })();
+    let postIds: number[] = [];
+    // No post edit moves files while the merge does (withMoveLock).
+    await withMoveLock(async () => {
+      postIds = db.prepare('SELECT id FROM posts WHERE creator_id = ?').pluck().all(from.id) as number[];
+      await moveMediaToAuthor(postIds, { creatorId: into.id });
+      db.transaction(() => {
+        // The source is read again here: it may have been classified (18+ or
+        // general) while the files were moving, and the merged profile must carry
+        // its current classification, not the snapshot taken before the move.
+        const cur = db.prepare('SELECT * FROM creators WHERE id = ?').get(from.id) as any;
+        if (cur) Object.assign(from, cur);
+        db.prepare('UPDATE posts SET creator_id = ? WHERE creator_id = ?').run(into.id, from.id);
+        db.prepare('UPDATE creator_aliases SET creator_id = ? WHERE creator_id = ?').run(into.id, from.id);
+        db.prepare('INSERT OR IGNORE INTO creator_aliases (alias, creator_id) VALUES (?, ?)').run(from.handle, into.id);
+        db.prepare('INSERT OR IGNORE INTO follows (user_id, creator_id, created_at) SELECT user_id, ?, created_at FROM follows WHERE creator_id = ?').run(into.id, from.id);
+        db.prepare('DELETE FROM follows WHERE creator_id = ?').run(from.id);
+        db.prepare(
+          `UPDATE creators SET
+             ig_handle = COALESCE(ig_handle, ?), tiktok_handle = COALESCE(tiktok_handle, ?),
+             avatar_source = CASE WHEN avatar_path IS NULL THEN ? ELSE avatar_source END, banner_source = CASE WHEN banner_path IS NULL THEN ? ELSE banner_source END,
+             avatar_path = COALESCE(avatar_path, ?), banner_path = COALESCE(banner_path, ?),
+             bio = CASE WHEN bio = '' THEN ? ELSE bio END, adult = MAX(adult, ?),
+             audience = CASE WHEN audience = 'general' OR ? = 'general' THEN 'general' ELSE audience END
+           WHERE id = ?`,
+        ).run(from.ig_handle, from.tiktok_handle, from.avatar_source, from.banner_source, from.avatar_path, from.banner_path, from.bio, from.adult, from.audience, into.id);
+        // The emptied profile keeps its row (soft-deleted), but its handle is freed to live on as an alias.
+        db.prepare("UPDATE creators SET deleted = 1, ig_autopoll = 0, tiktok_autopoll = 0, handle = handle || '~merged' || id WHERE id = ?").run(from.id);
+      })();
+    });
     reindexCreator(into.id);
     for (const uid of db.prepare('SELECT user_id FROM follows WHERE creator_id = ?').pluck().all(into.id) as number[]) {
       notify({ userId: uid, kind: 'system', creatorId: into.id, text: `${from.handle} was merged into ${into.handle}`, url: `/u/${into.handle}` });

@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import { config } from './config.js';
 import { db, now } from './db/index.js';
-import { creatorDir, mediaAbs, mediaRel, moveFile, sha256File, sniffFile, uniqueTarget, validateHandle, userDir, type Sniffed } from './media/files.js';
+import { creatorDir, mediaAbs, mediaRel, moveFile, placeFile, sha256File, sniffFile, validateHandle, userDir, type Sniffed } from './media/files.js';
 import { dHash, probe } from './media/probe.js';
 import { effectiveAudience } from './audience.js';
 
@@ -147,8 +148,7 @@ export async function createPost(input: CreatePostInput): Promise<CreatePostResu
   const placed: { abs: string; p: Prepared; meta: Awaited<ReturnType<typeof probe>> }[] = [];
   try {
     for (const p of ok) {
-      const dest = await uniqueTarget(dirRel, p.file.name, p.sniff.ext);
-      await moveFile(p.file.abs, dest);
+      const dest = await placeFile(p.file.abs, dirRel, p.file.name, p.sniff.ext);
       let meta;
       try {
         meta = await probe(dest, p.sniff.kind);
@@ -227,8 +227,7 @@ export async function addMediaToPost(postId: number, files: IncomingFile[], skip
   let pos = (db.prepare('SELECT COALESCE(MAX(position), -1) FROM media WHERE post_id = ?').pluck().get(postId) as number) + 1;
   let added = 0;
   for (const p of ok) {
-    const dest = await uniqueTarget(dirRel, p.file.name, p.sniff.ext);
-    await moveFile(p.file.abs, dest);
+    const dest = await placeFile(p.file.abs, dirRel, p.file.name, p.sniff.ext);
     let meta;
     try {
       meta = await probe(dest, p.sniff.kind);
@@ -256,39 +255,25 @@ export async function addMediaToPost(postId: number, files: IncomingFile[], skip
   return { postId, added, rejected };
 }
 
+let moveQueue: Promise<unknown> = Promise.resolve();
+
 /**
- * Moves every media file of the given posts into the new author's folder and
- * re-points the rows. Used by "change author" and by merging creators.
+ * Runs `fn` while no other reassignment (post author change, creator merge)
+ * moves files. A reassignment reads the media rows, moves the files and may
+ * move them back; two of them interleaving on the same post would leave rows
+ * and files apart.
  */
-/**
- * Moves a file to a free name in `dirRel` without ever replacing a file: two
- * moves (a reassignment and its undo, say) may pick the same free name at once,
- * and the loser takes the next one.
- */
-async function moveNoClobber(src: string, dirRel: string, hint: string, ext: string): Promise<string> {
-  for (let i = 0; ; i++) {
-    const dest = await uniqueTarget(dirRel, hint, ext);
-    try {
-      // A hard link fails with EEXIST instead of replacing; then the source goes.
-      await fsp.link(src, dest);
-      await fsp.unlink(src);
-      return dest;
-    } catch (err: any) {
-      if (err.code === 'EEXIST' && i < 20) continue;
-      if (err.code !== 'EXDEV' && err.code !== 'EPERM' && err.code !== 'ENOTSUP') throw err;
-    }
-    try {
-      // Another file system: copy without replacing, then remove the source.
-      await fsp.copyFile(src, dest, fs.constants.COPYFILE_EXCL);
-      await fsp.unlink(src);
-      return dest;
-    } catch (err: any) {
-      if (err.code === 'EEXIST' && i < 20) continue;
-      throw err;
-    }
-  }
+export function withMoveLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = moveQueue.then(fn, fn);
+  moveQueue = run.catch(() => undefined);
+  return run;
 }
 
+/**
+ * Moves every media file of the given posts into the new author's folder and
+ * re-points the rows. Used by "change author" and by merging creators; callers
+ * hold withMoveLock. A file never replaces another one (placeFile).
+ */
 export async function moveMediaToAuthor(postIds: number[], author: Author): Promise<void> {
   const dirRel = authorDir(author);
   const rows = db
@@ -300,14 +285,29 @@ export async function moveMediaToAuthor(postIds: number[], author: Author): Prom
     const src = mediaAbs(m.path);
     if (!fs.existsSync(src)) continue;
     const ext = m.path.match(/\.[^./]+$/)?.[0] ?? '';
-    const dest = await moveNoClobber(src, dirRel, m.path.split('/').pop() ?? 'file', ext);
+    const dest = await placeFile(src, dirRel, m.path.split('/').pop() ?? 'file', ext);
     try {
       upd.run(mediaRel(dest), m.id);
     } catch (err) {
-      await moveFile(dest, src).catch(() => undefined);
+      // Back to its old name if that is still free, otherwise to a free name
+      // beside it; the row follows the file either way.
+      try {
+        await moveFile(dest, src);
+      } catch {
+        const srcDir = m.path.includes('/') ? m.path.slice(0, m.path.lastIndexOf('/')) : '';
+        const again = await placeFile(dest, srcDir, m.path.split('/').pop() ?? 'file', ext).catch(() => null);
+        if (again) {
+          try {
+            upd.run(mediaRel(again), m.id);
+          } catch (e2) {
+            console.error(`Media ${m.id}: row still names ${m.path}; its file is at ${again}: ${(e2 as Error).message}`);
+          }
+        } else console.error(`Media ${m.id}: row still names ${m.path}; its file is at ${dest}`);
+      }
       throw err;
     }
   }
+  if (config.testMoveDelayMs) await new Promise((r) => setTimeout(r, config.testMoveDelayMs));
 }
 
 export function findCreatorByName(name: string): { id: number; handle: string } | undefined {

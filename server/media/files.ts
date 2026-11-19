@@ -129,15 +129,49 @@ export async function uniqueTarget(dirRel: string, nameHint: string, ext: string
   return path.join(dirAbs, `${base}_${crypto.randomBytes(4).toString('hex')}${ext}`);
 }
 
-/** Moves a file, falling back to copy + unlink across file systems. */
+/**
+ * Moves a file without ever replacing one: an existing `dest` fails with EEXIST.
+ * A hard link places the file, then the source goes; across file systems (or
+ * where hard links are not allowed) an exclusive copy does. When the source
+ * cannot be removed (another move took it first), the new copy is removed again
+ * so no untracked file is left behind.
+ */
 export async function moveFile(src: string, dest: string): Promise<void> {
   await fsp.mkdir(path.dirname(dest), { recursive: true });
   try {
-    await fsp.rename(src, dest);
+    await fsp.link(src, dest);
   } catch (err: any) {
-    if (err.code !== 'EXDEV') throw err;
-    await fsp.copyFile(src, dest, fs.constants.COPYFILE_EXCL);
+    if (err.code !== 'EXDEV' && err.code !== 'EPERM' && err.code !== 'ENOTSUP') throw err;
+    try {
+      await fsp.copyFile(src, dest, fs.constants.COPYFILE_EXCL);
+    } catch (copyErr: any) {
+      // A partial copy is ours to remove; an existing file (EEXIST) is not.
+      if (copyErr.code !== 'EEXIST') await fsp.unlink(dest).catch(() => undefined);
+      throw copyErr;
+    }
+  }
+  try {
     await fsp.unlink(src);
+  } catch (err) {
+    await fsp.unlink(dest).catch(() => undefined);
+    throw err;
+  }
+}
+
+/**
+ * Moves a file to a free name in `dirRel` and returns its absolute path. Two
+ * writers may pick the same free name at once; the loser takes the next one.
+ */
+export async function placeFile(src: string, dirRel: string, nameHint: string, ext: string): Promise<string> {
+  for (let i = 0; ; i++) {
+    const dest = await uniqueTarget(dirRel, nameHint, ext);
+    try {
+      await moveFile(src, dest);
+      return dest;
+    } catch (err: any) {
+      if (err.code === 'EEXIST' && i < 20) continue;
+      throw err;
+    }
   }
 }
 
