@@ -324,7 +324,6 @@ const BACKFILL_PAUSE_MS = 150;
  */
 export async function runMetadataBackfill(ctx: JobContext): Promise<string> {
   const get = db.prepare('SELECT value FROM settings WHERE key = ?').pluck();
-  const put = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
   let after = Number(get.get(BACKFILL_CURSOR_KEY) ?? 0) || 0;
   const total = db.prepare('SELECT COUNT(*) FROM posts WHERE deleted = 0').pluck().get() as number;
   const startDone = db.prepare('SELECT COUNT(*) FROM posts WHERE deleted = 0 AND id <= ?').pluck().get(after) as number;
@@ -337,10 +336,11 @@ export async function runMetadataBackfill(ctx: JobContext): Promise<string> {
       ctx.log(`Stopped after post ${after}`);
       break;
     }
+    // Stores its checkpoint with the batch; throws BackfillStopped (failing the
+    // job, checkpoint before the failed post) when a post's mentions cannot be stored.
     const n = metadataBackfillBatch(after, BACKFILL_BATCH, true, stats, seen);
     if (n === 0) break;
     after = stats.lastId;
-    put.run(BACKFILL_CURSOR_KEY, String(after));
     if (++batches % 10 === 0) ctx.log(`${startDone + stats.scanned} of ${total} posts (${Math.round(((startDone + stats.scanned) / Math.max(total, 1)) * 100)}%)`);
     await sleep(BACKFILL_PAUSE_MS, ctx);
   }

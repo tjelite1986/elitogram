@@ -596,12 +596,20 @@ export function emptyBackfillStats(): BackfillStats {
   return { scanned: 0, postsWithMentions: 0, newRelations: 0, removedRelations: 0, newCreators: 0, reusedCreators: 0, skipped: {}, postsWithStaleTags: 0, newHashtags: 0, newTagLinks: 0, lastId: 0 };
 }
 
+/** A post whose mentions could not be stored; the backfill checkpoint stays before it. */
+export class BackfillStopped extends Error {}
+
 /**
  * One batch of the backfill: the next `limit` live posts after `afterId`, by id.
  * Dry run (apply = false) reads only and counts what applying would write;
  * `seen` carries names, tags and creators across batches so nothing is counted
- * twice. Apply writes one transaction per batch: mention rows, creators for
- * new @names and hashtag rows. Captions, posts and files are never changed.
+ * twice. Apply reads the batch and writes it in one write transaction (BEGIN
+ * IMMEDIATE, so no caption can change between the read and the write): mention
+ * rows, creators for new @names, hashtag rows, and the checkpoint
+ * (BACKFILL_CURSOR_KEY) after the last post done. Captions, posts and files are
+ * never changed. A post whose mentions cannot be stored writes nothing: the
+ * posts before it commit with the checkpoint just before it, and
+ * BackfillStopped is thrown, so a rerun retries that post rather than skipping it.
  * Returns the number of posts read (0 = done).
  */
 export function metadataBackfillBatch(
@@ -611,91 +619,117 @@ export function metadataBackfillBatch(
   stats: BackfillStats,
   seen: { names: Set<string>; tags: Set<string>; reused: Set<number> },
 ): number {
-  const rows = db
-    .prepare('SELECT id, caption, creator_id, source_url, meta FROM posts WHERE id > ? AND deleted = 0 ORDER BY id LIMIT ?')
-    .all(afterId, limit) as { id: number; caption: string; creator_id: number | null; source_url: string | null; meta: string | null }[];
-  if (rows.length === 0) return 0;
   const tagKnown = db.prepare('SELECT 1 FROM hashtags WHERE tag = ?');
   const tagLinked = db.prepare('SELECT 1 FROM post_hashtags ph JOIN hashtags h ON h.id = ph.hashtag_id WHERE ph.post_id = ? AND h.tag = ?');
   const haveRows = db.prepare('SELECT creator_id FROM post_mentions WHERE post_id = ?').pluck();
-  const work = () => {
-    for (const p of rows) {
-      stats.scanned++;
-      stats.lastId = p.id;
-      const caption = p.caption ?? '';
-      // Hashtags: only a post whose rows differ from its caption is rewritten.
-      const tags = parseHashtags(caption);
-      const tagsChanged = hashtagsStale(p.id, caption);
-      if (tagsChanged) {
-        stats.postsWithStaleTags++;
-        for (const t of tags) {
-          if (!tagKnown.get(t) && !seen.tags.has(t)) {
-            seen.tags.add(t);
-            stats.newHashtags++;
-          }
-          if (!tagLinked.get(p.id, t)) stats.newTagLinks++;
+  type Row = { id: number; caption: string; creator_id: number | null; source_url: string | null; meta: string | null };
+  const one = (p: Row) => {
+    stats.scanned++;
+    stats.lastId = p.id;
+    const caption = p.caption ?? '';
+    // Hashtags: only a post whose rows differ from its caption is rewritten.
+    const tags = parseHashtags(caption);
+    const tagsChanged = hashtagsStale(p.id, caption);
+    if (tagsChanged) {
+      stats.postsWithStaleTags++;
+      for (const t of tags) {
+        if (!tagKnown.get(t) && !seen.tags.has(t)) {
+          seen.tags.add(t);
+          stats.newHashtags++;
         }
-        if (apply) {
-          setPostHashtags(p.id, caption);
-          // Tags are part of the post's search row.
-          indexPost(p.id);
-        }
+        if (!tagLinked.get(p.id, t)) stats.newTagLinks++;
       }
-      // Mentions.
-      const names = parseMentions(caption);
-      if (names.length === 0 && (haveRows.all(p.id) as number[]).length === 0) continue;
-      if (names.length) stats.postsWithMentions++;
-      const have = new Set(haveRows.all(p.id) as number[]);
       if (apply) {
-        const r = linkMentionsSafely(p.id);
-        if (!r) {
-          stats.skipped.error = (stats.skipped.error ?? 0) + 1;
-          continue;
-        }
-        stats.newCreators += r.created.length;
-        // A creator made in this run is never counted as reused by a later post.
-        for (const id of r.created) seen.reused.add(id);
-        for (const id of r.linked) {
-          if (!have.has(id)) stats.newRelations++;
-          if (!seen.reused.has(id)) {
-            seen.reused.add(id);
-            stats.reusedCreators++;
-          }
-        }
-        for (const id of have) if (!r.linked.includes(id)) stats.removedRelations++;
-        for (const s of r.skipped) stats.skipped[s.reason] = (stats.skipped[s.reason] ?? 0) + 1;
-      } else {
-        const platform = postPlatform(p.source_url, p.meta);
-        const want = new Set<string>();
-        for (const name of names) {
-          const plan = planMention(name, platform, p.creator_id);
-          if (plan.action === 'skip') {
-            stats.skipped[plan.reason] = (stats.skipped[plan.reason] ?? 0) + 1;
-            continue;
-          }
-          if (plan.action === 'create') {
-            // Every later post naming it links to the creator made for the first one.
-            if (!seen.names.has(plan.name)) {
-              seen.names.add(plan.name);
-              stats.newCreators++;
-            }
-            if (!want.has(`n:${plan.name}`)) stats.newRelations++;
-            want.add(`n:${plan.name}`);
-            continue;
-          }
-          if (want.has(`c:${plan.creatorId}`)) continue;
-          want.add(`c:${plan.creatorId}`);
-          if (!have.has(plan.creatorId)) stats.newRelations++;
-          if (!seen.reused.has(plan.creatorId)) {
-            seen.reused.add(plan.creatorId);
-            stats.reusedCreators++;
-          }
-        }
-        for (const id of have) if (!want.has(`c:${id}`)) stats.removedRelations++;
+        setPostHashtags(p.id, caption);
+        // Tags are part of the post's search row.
+        indexPost(p.id);
       }
     }
+    // Mentions.
+    const names = parseMentions(caption);
+    if (names.length === 0 && (haveRows.all(p.id) as number[]).length === 0) return;
+    if (names.length) stats.postsWithMentions++;
+    const have = new Set(haveRows.all(p.id) as number[]);
+    if (apply) {
+      // Throws when a mention cannot be stored; the caller undoes this post.
+      const r = setPostMentions(p.id);
+      stats.newCreators += r.created.length;
+      // A creator made in this run is never counted as reused by a later post.
+      for (const id of r.created) seen.reused.add(id);
+      for (const id of r.linked) {
+        if (!have.has(id)) stats.newRelations++;
+        if (!seen.reused.has(id)) {
+          seen.reused.add(id);
+          stats.reusedCreators++;
+        }
+      }
+      for (const id of have) if (!r.linked.includes(id)) stats.removedRelations++;
+      for (const sk of r.skipped) stats.skipped[sk.reason] = (stats.skipped[sk.reason] ?? 0) + 1;
+    } else {
+      const platform = postPlatform(p.source_url, p.meta);
+      const want = new Set<string>();
+      for (const name of names) {
+        const plan = planMention(name, platform, p.creator_id);
+        if (plan.action === 'skip') {
+          stats.skipped[plan.reason] = (stats.skipped[plan.reason] ?? 0) + 1;
+          continue;
+        }
+        if (plan.action === 'create') {
+          // Every later post naming it links to the creator made for the first one.
+          if (!seen.names.has(plan.name)) {
+            seen.names.add(plan.name);
+            stats.newCreators++;
+          }
+          if (!want.has(`n:${plan.name}`)) stats.newRelations++;
+          want.add(`n:${plan.name}`);
+          continue;
+        }
+        if (want.has(`c:${plan.creatorId}`)) continue;
+        want.add(`c:${plan.creatorId}`);
+        if (!have.has(plan.creatorId)) stats.newRelations++;
+        if (!seen.reused.has(plan.creatorId)) {
+          seen.reused.add(plan.creatorId);
+          stats.reusedCreators++;
+        }
+      }
+      for (const id of have) if (!want.has(`c:${id}`)) stats.removedRelations++;
+    }
   };
-  if (apply) db.transaction(work)();
-  else work();
-  return rows.length;
+  const select = () =>
+    db.prepare('SELECT id, caption, creator_id, source_url, meta FROM posts WHERE id > ? AND deleted = 0 ORDER BY id LIMIT ?').all(afterId, limit) as Row[];
+  if (!apply) {
+    const rows = select();
+    rows.forEach(one);
+    return rows.length;
+  }
+  let failed: { id: number; message: string } | null = null;
+  const read = db
+    .transaction(() => {
+      const rows = select();
+      const start = stats.lastId;
+      for (const p of rows) {
+        const before = { ...stats, skipped: { ...stats.skipped } };
+        const reusedBefore = new Set(seen.reused);
+        try {
+          // A savepoint per post: a failed post leaves no partial rows behind.
+          db.transaction(() => one(p))();
+        } catch (err) {
+          Object.assign(stats, before);
+          seen.reused.clear();
+          for (const id of reusedBefore) seen.reused.add(id);
+          failed = { id: p.id, message: (err as Error).message };
+          break;
+        }
+      }
+      if (stats.lastId > start && stats.lastId > afterId) {
+        db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(BACKFILL_CURSOR_KEY, String(stats.lastId));
+      }
+      return rows.length;
+    })
+    .immediate();
+  if (failed) {
+    const f = failed as { id: number; message: string };
+    throw new BackfillStopped(`Mentions of post ${f.id} could not be stored (${f.message}); the backfill stopped before it and resumes there`);
+  }
+  return read;
 }
