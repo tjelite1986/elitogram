@@ -255,18 +255,34 @@ creators.get('/creator-identities', (req, res) => {
     }
     return [...names];
   };
-  for (const h of [...new Set(handles)]) {
-    const c = one.get({ h, me: req.user!.id }) as any;
-    if (c) {
-      items[c.handle] = namesOf(c);
-      continue;
-    }
-    if (scope !== 'general') continue;
-    const m = outside.get(h) as any;
-    if (!m || !limitedReachable(req, m.id)) continue;
+  // Which answer a creator gets is decided by the profile the caller can open,
+  // before the ordinary branch: in the general scope a creator not classified
+  // general opens at most as a limited profile, so it gets the limited name
+  // projection even when an owned post (a deleted one included) makes it
+  // eligible. Eligibility and the names returned are separate questions.
+  const generalProfile = db.prepare(`SELECT 1 FROM creators c WHERE c.id = ? AND ${creatorScopeSql('general')}`);
+  const limitedNames = (m: any): string[] | null => {
     const shown = m.origin === 'mention' ? String(m.display_name ?? '').trim().replace(/^@/, '').toLowerCase() : '';
     const names = namesOf(m);
-    if (names.every((n) => n === shown)) items[m.handle] = names;
+    return names.every((n) => n === shown) ? names : null;
+  };
+  for (const h of [...new Set(handles)]) {
+    const c = one.get({ h, me: req.user!.id }) as any;
+    if (scope === 'general') {
+      const m = outside.get(h) as any;
+      if (!m) continue;
+      if (generalProfile.get(m.id)) {
+        if (c) items[c.handle] = namesOf(c);
+        continue;
+      }
+      // Limited at most: eligible through the ordinary branch or as a limited
+      // profile, answered with the limited projection either way.
+      if (!c && !limitedReachable(req, m.id)) continue;
+      const names = limitedNames(m);
+      if (names) items[m.handle] = names;
+      continue;
+    }
+    if (c) items[c.handle] = namesOf(c);
   }
   // Accounts have no other names; listed when they exist, whatever creator
   // shares the name.
