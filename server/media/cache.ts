@@ -226,6 +226,9 @@ export function cacheClean(dryRun: boolean, cancel: Cancel = never) {
     // errors stop the call.
     for (const e of list) {
       if (files >= CLEAN_LIMIT || errors.length >= 20) break;
+      // Other requests get their turn between entries, never between an
+      // entry's final check and its unlink.
+      await new Promise((resolve) => setImmediate(resolve));
       // Checked before every unlink: once Grabbit has gone, nothing more is removed.
       if (cancel.cancelled()) {
         stopReason = 'disconnected';
@@ -248,8 +251,11 @@ export function cacheClean(dryRun: boolean, cancel: Cancel = never) {
         skipped++;
         continue;
       }
+      // In the same turn as the check above: an async unlink would run
+      // later on a worker, after a media row could have made the name
+      // current again.
       try {
-        await fsp.unlink(mediaAbs(e.rel));
+        fs.unlinkSync(mediaAbs(e.rel));
         files++;
         bytes += e.bytes;
       } catch (err) {

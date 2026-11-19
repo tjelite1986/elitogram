@@ -257,6 +257,47 @@ stmtProto.get = realGet;
 expect('clean that fails before any unlink is a plain 422', none2.status === 422 && !('mayHaveChanged' in none2) && none2.files === undefined);
 const fin = await call('POST', 'cache/clean', { dryRun: false });
 expect('clean reports stoppedEarly false when it ran to the end', fin.stoppedEarly === false && fin.stopReason === null);
+// Round 8: the final check and the unlink run in the same turn. A media row
+// that makes a stale name current again while an unlink is queued must not
+// lose its thumbnail: at the moment each file is actually removed, no row
+// may claim it.
+{
+  const fsp = (await import('node:fs/promises')).default;
+  const nowTs = Date.now();
+  const row = { id: 8800, path: 'alice/r8.png', sha256: crypto.createHash('sha256').update('r8 media').digest('hex'), created_at: nowTs };
+  const ident = mediaIdentity(row);
+  const rel = `_thumbs/gh/m${ident}_480.webp`;
+  put(rel, 'became current');
+  const abs = path.join(media, rel);
+  let reinserted = false;
+  const claimed = () => {
+    const r = db.prepare('SELECT id, sha256, path, created_at FROM media WHERE id = ?').get(row.id) as any;
+    return Boolean(r && mediaIdentity(r) === ident);
+  };
+  const violations: string[] = [];
+  const realGet2 = stmtProto.get;
+  stmtProto.get = function (this: any, ...args: unknown[]) {
+    const out = realGet2.apply(this, args);
+    if (!reinserted && /^SELECT id, sha256, path, created_at FROM media WHERE id = \?/.test(this.source) && args[0] === row.id) {
+      reinserted = true;
+      // Another request inserts the row as soon as the event loop is free.
+      setImmediate(() => db.prepare("INSERT INTO media (id, post_id, kind, mime, path, size, sha256, created_at) VALUES (?,?,'image','image/png',?,1,?,?)").run(row.id, 1, row.path, row.sha256, row.created_at));
+    }
+    return out;
+  };
+  const realU = fs.unlinkSync, realPU = fsp.unlink;
+  (fs as any).unlinkSync = (p: fs.PathLike) => { if (path.resolve(String(p)) === abs && claimed()) violations.push('sync'); return realU(p); };
+  // A busy worker pool: a queued unlink runs a turn later.
+  (fsp as any).unlink = async (p: fs.PathLike) => { await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r)); if (path.resolve(String(p)) === abs && claimed()) violations.push('async'); return realPU(p); };
+  const r8 = await call('POST', 'cache/clean', { dryRun: false });
+  stmtProto.get = realGet2;
+  (fs as any).unlinkSync = realU;
+  (fsp as any).unlink = realPU;
+  expect('r8 clean ran over the stale name', r8.status === 200 && reinserted);
+  expect('r8 no thumbnail is removed while a row claims it', violations.length === 0 && (fs.existsSync(abs) ? claimed() : true));
+  db.prepare('DELETE FROM media WHERE id = ?').run(row.id);
+  if (fs.existsSync(abs)) fs.unlinkSync(abs);
+}
 // The token file is read on every request: a rotated token works at once,
 // the old one stops, and a removed file closes the routes.
 const NEW = 'n'.repeat(40);
