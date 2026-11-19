@@ -232,6 +232,29 @@ try {
 }
 expect('thumbnail refuses a symlinked shard', refused && fs.readdirSync(elsewhere).length === 0);
 fs.unlinkSync(path.join(media, '_thumbs/zz'));
+// Round 7: a database error after some files were removed answers 200 with
+// the exact counts and the error, never a plain refusal.
+for (let i = 0; i < 3; i++) put(`_thumbs/ef/m${7000 + i}-0123456789ab_480.webp`, 'stale r7');
+const stmtProto = Object.getPrototypeOf(db.prepare('SELECT 1'));
+const realGet = stmtProto.get;
+let staleSeen = 0;
+stmtProto.get = function (this: any, ...args: unknown[]) {
+  if (/FROM media WHERE id = \?/.test(this.source) && /^SELECT id, sha256, path, created_at/.test(this.source) && ++staleSeen === 2) {
+    throw Object.assign(new Error('SQLITE_IOERR: disk I/O error'), { code: 'SQLITE_IOERR' });
+  }
+  return realGet.apply(this, args);
+};
+const partial = await call('POST', 'cache/clean', { dryRun: false });
+stmtProto.get = realGet;
+expect('clean that fails after an unlink answers 200 with counts and the error', partial.status === 200 && partial.files === 1 && partial.stopReason === 'error' && partial.stoppedEarly === true && partial.errors.some((x: string) => /SQLITE_IOERR/.test(x)));
+staleSeen = 0;
+stmtProto.get = function (this: any, ...args: unknown[]) {
+  if (/^SELECT id, sha256, path, created_at FROM media WHERE id = \?/.test(this.source)) throw Object.assign(new Error('SQLITE_IOERR: disk I/O error'), { code: 'SQLITE_IOERR' });
+  return realGet.apply(this, args);
+};
+const none2 = await call('POST', 'cache/clean', { dryRun: false });
+stmtProto.get = realGet;
+expect('clean that fails before any unlink is a plain 422', none2.status === 422 && !('mayHaveChanged' in none2) && none2.files === undefined);
 const fin = await call('POST', 'cache/clean', { dryRun: false });
 expect('clean reports stoppedEarly false when it ran to the end', fin.stoppedEarly === false && fin.stopReason === null);
 // The token file is read on every request: a rotated token works at once,

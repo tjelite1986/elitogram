@@ -43,7 +43,7 @@ export interface Cancel {
   cancelled: () => boolean;
 }
 const never: Cancel = { cancelled: () => false };
-type StopReason = 'time' | 'disconnected' | null;
+type StopReason = 'time' | 'disconnected' | 'error' | null;
 
 /** Thrown by a walk whose time ran out; the rebuild answers with stopReason 'time'. */
 class OutOfTime extends Error {}
@@ -231,7 +231,20 @@ export function cacheClean(dryRun: boolean, cancel: Cancel = never) {
         stopReason = 'disconnected';
         break;
       }
-      if (!stillRemovable(e)) {
+      // A failure here (a database read, a folder check) after files were
+      // already removed must not reach the caller as "nothing changed": the
+      // call stops and answers what it did, with the error. Before any
+      // unlink was even tried it is a plain failure.
+      let ok: boolean;
+      try {
+        ok = stillRemovable(e);
+      } catch (err) {
+        if (files === 0 && errors.length === 0) throw err;
+        errors.push(`stopped: ${(err as Error).message}`);
+        stopReason = 'error';
+        break;
+      }
+      if (!ok) {
         skipped++;
         continue;
       }
