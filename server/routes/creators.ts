@@ -327,7 +327,7 @@ creators.post('/creators-classify', requirePerm('profiles'), (req, res) => {
   res.json({ audience, updated, skipped });
 });
 
-creators.post('/creators', requirePerm('profiles'), (req, res) => {
+creators.post('/creators', refuseScoped, requirePerm('profiles'), (req, res) => {
   const handle = str(req.body?.handle, 80).trim().toLowerCase().replace(/^@/, '');
   try {
     const id = createCreator(handle, { displayName: str(req.body?.display_name, 120), adult: !!req.body?.adult });
