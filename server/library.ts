@@ -78,19 +78,27 @@ export type MentionPlan =
   | { name: string; action: 'skip'; reason: 'self' | 'invalid' | 'deleted' | 'other-account' | 'ambiguous' };
 
 /**
- * What one @name in a post's caption should point at, read-only.
+ * What one @name in a post's caption should point at, read-only. Live
+ * creators always win over deleted ones; a deleted creator is never revived
+ * and its name is never handed to a new creator. In order:
  *
- * 1. Platform known: a creator holding that account on the post's platform
- *    (ig_handle / tiktok_handle). Several creators claiming the same account
+ * 1. Platform known: a live creator holding that account on the post's
+ *    platform (ig_handle / tiktok_handle). Several claiming the same account
  *    is ambiguous: the mention is skipped rather than guessed.
- * 2. A creator whose handle or alias is the name, unless it holds a different
- *    account on the post's platform (skipped: accounts on different platforms
- *    are never merged by a mention). A creator known for that name only as an
- *    account on the OTHER platform is ambiguous too: the same spelling on two
- *    platforms may be two people, so a separate mention creator is made.
- * 3. Platform unknown: a creator holding the name as an account on either
- *    platform, when exactly one does.
- * A deleted creator (by handle or alias) is never revived.
+ * 2. Platform unknown: the distinct live creators that claim the name, as an
+ *    account on either platform or as handle or alias. More than one is
+ *    ambiguous (Instagram "sam" and TikTok "u-sam" both claim @sam), whichever
+ *    of them happens to hold the plain handle.
+ * 3. A live creator whose handle or alias is the name, unless it holds a
+ *    different account on the post's platform (skipped: accounts on different
+ *    platforms are never merged by a mention). One known for the name only
+ *    as the OTHER platform's account may be someone else: a separate mention
+ *    creator is planned (step 4 applies).
+ * 4. Before a new creator is planned: a deleted creator holding the name as
+ *    handle or alias, or as the account on the post's platform (either
+ *    platform when unknown), skips it ('deleted'), so a deleted "u-sam" for
+ *    TikTok @sam is not recreated as "u-sam-2". A live owner found in steps
+ *    1-3 is linked first, whatever tombstone shares the name.
  */
 export function planMention(name: string, platform: Platform, authorId: number | null): MentionPlan {
   const n = name.toLowerCase();
@@ -98,6 +106,18 @@ export function planMention(name: string, platform: Platform, authorId: number |
   const col = platform === 'instagram' ? 'ig_handle' : platform === 'tiktok' ? 'tiktok_handle' : null;
   const otherCol = platform === 'instagram' ? 'tiktok_handle' : platform === 'tiktok' ? 'ig_handle' : null;
   const link = (id: number): MentionPlan => (id === authorId ? { name: n, action: 'skip', reason: 'self' } : { name: n, action: 'link', creatorId: id });
+  const create = (): MentionPlan => {
+    const accountCond = col ? `${col} = ? COLLATE NOCASE` : '(ig_handle = ? COLLATE NOCASE OR tiktok_handle = ? COLLATE NOCASE)';
+    const accountArgs = col ? [n] : [n, n];
+    if (
+      db.prepare('SELECT 1 FROM creators WHERE handle = ? AND deleted = 1').get(n) ||
+      db.prepare('SELECT 1 FROM creator_aliases a JOIN creators c ON c.id = a.creator_id WHERE a.alias = ? AND c.deleted = 1').get(n) ||
+      db.prepare(`SELECT 1 FROM creators WHERE ${accountCond} AND deleted = 1`).get(...accountArgs)
+    )
+      return { name: n, action: 'skip', reason: 'deleted' };
+    if (validateHandle(n) && validateHandle(mentionHandle(n))) return { name: n, action: 'skip', reason: 'invalid' };
+    return { name: n, action: 'create' };
+  };
   if (col) {
     const owners = db.prepare(`SELECT id FROM creators WHERE ${col} = ? COLLATE NOCASE AND deleted = 0 ORDER BY id LIMIT 2`).pluck().all(n) as number[];
     if (owners.length > 1) return { name: n, action: 'skip', reason: 'ambiguous' };
@@ -109,28 +129,27 @@ export function planMention(name: string, platform: Platform, authorId: number |
     db.prepare(`SELECT c.id, ${acct} AS acct, ${other} AS other FROM creator_aliases a JOIN creators c ON c.id = a.creator_id WHERE a.alias = ? AND c.deleted = 0`).get(n)) as
     | { id: number; acct: string | null; other: string | null }
     | undefined;
+  if (!platform) {
+    // Every distinct live claimant of the name, checked before any of them is taken.
+    const claimants = new Set(
+      db.prepare('SELECT id FROM creators WHERE (ig_handle = ? COLLATE NOCASE OR tiktok_handle = ? COLLATE NOCASE) AND deleted = 0 ORDER BY id LIMIT 3').pluck().all(n, n) as number[],
+    );
+    if (hit) claimants.add(hit.id);
+    if (claimants.size > 1) return { name: n, action: 'skip', reason: 'ambiguous' };
+    if (claimants.size === 1) return link([...claimants][0]);
+    return create();
+  }
   if (hit) {
     if (hit.acct && hit.acct.toLowerCase() !== n) return { name: n, action: 'skip', reason: 'other-account' };
     if (hit.id === authorId) return { name: n, action: 'skip', reason: 'self' };
     // Known for this name only on the other platform: a separate creator.
     if (!hit.acct && hit.other && hit.other.toLowerCase() === n) {
-      return validateHandle(`u-${n.replace(/^[_.]+/, '')}`) ? { name: n, action: 'skip', reason: 'invalid' } : { name: n, action: 'create' };
+      if (validateHandle(`u-${n.replace(/^[_.]+/, '')}`)) return { name: n, action: 'skip', reason: 'invalid' };
+      return create();
     }
     return link(hit.id);
   }
-  if (!platform) {
-    // Platform unknown: the name may still be a known account on either one.
-    const owners = db.prepare('SELECT id FROM creators WHERE (ig_handle = ? COLLATE NOCASE OR tiktok_handle = ? COLLATE NOCASE) AND deleted = 0 ORDER BY id LIMIT 2').pluck().all(n, n) as number[];
-    if (owners.length > 1) return { name: n, action: 'skip', reason: 'ambiguous' };
-    if (owners.length === 1) return link(owners[0]);
-  }
-  if (
-    db.prepare('SELECT 1 FROM creators WHERE handle = ? AND deleted = 1').get(n) ||
-    db.prepare('SELECT 1 FROM creator_aliases a JOIN creators c ON c.id = a.creator_id WHERE a.alias = ? AND c.deleted = 1').get(n)
-  )
-    return { name: n, action: 'skip', reason: 'deleted' };
-  if (validateHandle(n) && validateHandle(mentionHandle(n))) return { name: n, action: 'skip', reason: 'invalid' };
-  return { name: n, action: 'create' };
+  return create();
 }
 
 /**
