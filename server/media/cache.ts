@@ -23,12 +23,27 @@ import { thumbnail } from './probe.js';
  */
 
 const NAME = /^m(\d+)(?:-([0-9a-f]{12}))?_(\d+)\.webp$/;
-const TMP = /\.webp\.\d+\.tmp$/;
+const TMP = /\.webp\.\d+(?:-[0-9a-f]{16})?\.tmp$/;
 const TMP_AGE_MS = 60 * 60 * 1000;
 export const REBUILD_LIMIT = 100;
 // At most this many files go per clean call; the owner runs it again for more.
 export const CLEAN_LIMIT = 100;
 const REBUILD_WIDTH = 480;
+// Grabbit gives each call 20 s. A rebuild stops starting new thumbnails after
+// this long and answers with what it made; the caller calls again for the
+// rest. EGRAM_DEDUPE_REBUILD_BUDGET_MS overrides it (tests use a tiny one).
+const REBUILD_BUDGET_MS = 15_000;
+function rebuildBudgetMs(): number {
+  const v = Number(process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS);
+  return Number.isFinite(v) && v >= 0 ? Math.min(v, REBUILD_BUDGET_MS) : REBUILD_BUDGET_MS;
+}
+
+/** Tells a long call that its client went away, so it stops starting work. */
+export interface Cancel {
+  cancelled: () => boolean;
+}
+const never: Cancel = { cancelled: () => false };
+type StopReason = 'time' | 'disconnected' | null;
 
 type Kind = 'current' | 'legacy' | 'stale' | 'partial' | 'other';
 interface Entry {
@@ -182,7 +197,7 @@ async function exclusive<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-export function cacheClean(dryRun: boolean) {
+export function cacheClean(dryRun: boolean, cancel: Cancel = never) {
   return exclusive(async () => {
     const list = (await walk()).filter(removable);
     const batch = list.slice(0, CLEAN_LIMIT);
@@ -193,12 +208,18 @@ export function cacheClean(dryRun: boolean) {
     let bytes = 0;
     let skipped = 0;
     const errors: string[] = [];
+    let stopReason: StopReason = null;
     // Walk the whole list until CLEAN_LIMIT files are removed: entries that
     // became current again or were already gone do not use up the batch, or
     // a run of them at the front would stall every later call. Twenty real
     // errors stop the call.
     for (const e of list) {
       if (files >= CLEAN_LIMIT || errors.length >= 20) break;
+      // Checked before every unlink: once Grabbit has gone, nothing more is removed.
+      if (cancel.cancelled()) {
+        stopReason = 'disconnected';
+        break;
+      }
       if (!stillRemovable(e)) {
         skipped++;
         continue;
@@ -215,11 +236,11 @@ export function cacheClean(dryRun: boolean) {
     // Shard folders stay, even empty: a thumbnail() that just made one would
     // otherwise lose it before its write.
     console.log(`[dedupe] cache clean: removed ${files} unused thumbnails (${bytes} bytes)`);
-    return { dryRun: false, files, bytes, skipped, errors, remaining: Math.max(0, list.length - files - skipped) };
+    return { dryRun: false, files, bytes, skipped, errors, remaining: Math.max(0, list.length - files - skipped), stoppedEarly: stopReason !== null, stopReason };
   });
 }
 
-export function cacheRebuild(dryRun: boolean) {
+export function cacheRebuild(dryRun: boolean, cancel: Cancel = never) {
   return exclusive(async () => {
     // A _thumbs that exists but is not a real folder (a symlink or a file)
     // would have the rebuild write through it into someone else's files.
@@ -230,7 +251,21 @@ export function cacheRebuild(dryRun: boolean) {
     if (dryRun) return { dryRun: true, missing: todo.length, limit: Math.min(REBUILD_LIMIT, todo.length) };
     let made = 0;
     let failed = 0;
+    let inProgress = 0;
+    let stopReason: StopReason = null;
+    const started = Date.now();
+    const budget = rebuildBudgetMs();
     for (const m of todo.slice(0, REBUILD_LIMIT)) {
+      // Nothing new starts once the time is spent or Grabbit has gone.
+      if (cancel.cancelled()) {
+        stopReason = 'disconnected';
+        break;
+      }
+      const left = budget - (Date.now() - started);
+      if (left <= 0) {
+        stopReason = 'time';
+        break;
+      }
       // The same check per write, for the folder and the shard it lands in.
       const key = `m${m.ident}`;
       const shard = mediaAbs(`${APP_DIRS.thumbs}/${key.slice(-2).padStart(2, '0')}`);
@@ -239,13 +274,31 @@ export function cacheRebuild(dryRun: boolean) {
         failed++;
         continue;
       }
+      // A slow video does not hold the answer past the budget: it finishes in
+      // the background like a thumbnail made on view, and the next call finds
+      // it done (or waits on the same in-flight write, never a second one).
+      let timer: NodeJS.Timeout | undefined;
+      const late = new Promise<'late'>((r) => {
+        timer = setTimeout(() => r('late'), left);
+      });
       try {
-        await thumbnail(m.path, m.kind, key, REBUILD_WIDTH);
+        const r = await Promise.race([thumbnail(m.path, m.kind, key, REBUILD_WIDTH), late]);
+        if (r === 'late') {
+          inProgress++;
+          stopReason = 'time';
+          break;
+        }
         made++;
       } catch {
         failed++;
+      } finally {
+        clearTimeout(timer);
       }
     }
-    return { dryRun: false, made, failed, missing: Math.max(0, todo.length - made) };
+    // remaining: thumbnails still to make after this call (the same as missing,
+    // named like clean's); stoppedEarly says to call again before the batch
+    // limit was reached.
+    const left = Math.max(0, todo.length - made);
+    return { dryRun: false, made, failed, missing: left, remaining: left, inProgress, stoppedEarly: stopReason !== null, stopReason };
   });
 }

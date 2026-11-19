@@ -5,7 +5,7 @@ import { db } from '../db/index.js';
 import { effectiveAudience } from '../audience.js';
 import { ah } from '../http.js';
 import { APP_DIRS, mediaAbs, mediaIdentity } from '../media/files.js';
-import { cacheClean, cacheRebuild, cacheStatus } from '../media/cache.js';
+import { cacheClean, cacheRebuild, cacheStatus, type Cancel } from '../media/cache.js';
 
 /**
  * Grabbit dedupe v1: Elitogram's side of Grabbit's Smart Duplicate Manager.
@@ -75,9 +75,28 @@ dedupe.use((err: any, _req: Request, res: Response, next: NextFunction) => {
 
 const dryRunOf = (req: Request) => req.body?.dryRun !== false;
 
+// The response closing before it was sent means the client gave up (Grabbit
+// stops waiting after 20 s): clean and rebuild then stop starting new work
+// and release the cache lock.
+function cancelOnClose(res: Response): Cancel {
+  let gone = false;
+  res.on('close', () => {
+    if (!res.writableEnded) gone = true;
+  });
+  return { cancelled: () => gone };
+}
+
 dedupe.get('/cache', ah(async (_req, res) => res.json(await cacheStatus())));
-dedupe.post('/cache/clean', ah(async (req, res) => res.json(await cacheClean(dryRunOf(req)))));
-dedupe.post('/cache/rebuild', ah(async (req, res) => res.json(await cacheRebuild(dryRunOf(req)))));
+dedupe.post('/cache/clean', ah(async (req, res) => {
+  const cancel = cancelOnClose(res);
+  const out = await cacheClean(dryRunOf(req), cancel);
+  if (!cancel.cancelled()) res.json(out);
+}));
+dedupe.post('/cache/rebuild', ah(async (req, res) => {
+  const cancel = cancelOnClose(res);
+  const out = await cacheRebuild(dryRunOf(req), cancel);
+  if (!cancel.cancelled()) res.json(out);
+}));
 
 interface Ref {
   type: string;

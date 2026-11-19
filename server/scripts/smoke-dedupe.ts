@@ -2,13 +2,17 @@
  * Smoke test for Grabbit dedupe v1 (server/routes/dedupe.ts). Runs on a
  * throwaway DATA_DIR and MEDIA_ROOT, never on a real library:
  *   T=$(mktemp -d) && mkdir -p $T/data $T/media && \
- *   head -c 48 /dev/urandom | base64 > $T/token && \
- *   T=$T DATA_DIR=$T/data MEDIA_ROOT=$T/media GRABBIT_DEDUPE_TOKEN_FILE=$T/token npx tsx server/scripts/smoke-dedupe.ts
+ *   T=$T DATA_DIR=$T/data MEDIA_ROOT=$T/media npx tsx server/scripts/smoke-dedupe.ts
+ * The token file is the script's own: it makes a private temp folder, writes
+ * a random token there (0600) and points GRABBIT_DEDUPE_TOKEN_FILE at it
+ * before the app is loaded. An inherited GRABBIT_DEDUPE_TOKEN_FILE is ignored,
+ * never written or removed, and checked to be untouched at the end.
  * Exits non-zero when a check fails.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import express from 'express';
 import sharp from 'sharp';
 const T = process.env.T!;
@@ -28,6 +32,24 @@ try {
 }
 fs.mkdirSync(media, { recursive: true });
 fs.mkdirSync(path.join(media, 'alice'));
+// Own token file, set before the app is imported. The inherited path (maybe a
+// real credential) is only looked at, to prove it was left alone.
+const inheritedTokenFile = process.env.GRABBIT_DEDUPE_TOKEN_FILE || null;
+const snapshot = (f: string | null) => {
+  if (!f) return null;
+  try {
+    const st = fs.lstatSync(f);
+    return `${st.ino}:${st.size}:${st.mtimeMs}:${st.isFile() ? crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex') : 'nofile'}`;
+  } catch {
+    return 'absent';
+  }
+};
+const inheritedBefore = snapshot(inheritedTokenFile);
+const tokenDir = fs.mkdtempSync(path.join(os.tmpdir(), 'egram-smoke-token-'));
+const tokenFile = path.join(tokenDir, 'token');
+fs.writeFileSync(tokenFile, crypto.randomBytes(36).toString('base64'), { mode: 0o600, flag: 'wx' });
+process.env.GRABBIT_DEDUPE_TOKEN_FILE = tokenFile;
+delete process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS;
 const { db } = await import('../db/index.js');
 const { mediaIdentity } = await import('../media/files.js');
 const { dedupe } = await import('../routes/dedupe.js');
@@ -53,7 +75,7 @@ const app = express();
 app.use('/api/dedupe/v1', dedupe);
 const srv = app.listen(0);
 const port = (srv.address() as any).port;
-const TOK = fs.readFileSync(process.env.GRABBIT_DEDUPE_TOKEN_FILE!, 'utf8').trim();
+const TOK = fs.readFileSync(tokenFile, 'utf8').trim();
 const call = async (method: string, route: string, body?: unknown, tok: string | null = TOK) => {
   const h: Record<string, string> = { 'content-type': 'application/json' };
   if (tok) h['x-grabbit-dedupe-token'] = tok;
@@ -106,14 +128,46 @@ const cl = await call('POST', 'cache/clean', { dryRun: false });
 expect('clean finds nothing through a symlinked _thumbs', cl.files === 0 && fs.readdirSync(elsewhere).length === 0);
 fs.unlinkSync(path.join(media, '_thumbs'));
 fs.renameSync(path.join(media, '_thumbs.real'), path.join(media, '_thumbs'));
+// Rebuild writes through a fresh, exclusively created temp file: a symlink
+// planted at the old predictable temp name is not followed.
+const victim = path.join(T, 'victim.txt');
+fs.writeFileSync(victim, 'victim');
+const extra = 30;
+for (let i = 0; i < extra; i++) {
+  const id = 10 + i;
+  fs.writeFileSync(path.join(media, `alice/p${id}.png`), png);
+  db.prepare("INSERT INTO posts (id, creator_id, caption, created_at, imported_at) VALUES (?,1,'extra',?,?)").run(id, now + 1000 + i, now);
+  db.prepare("INSERT INTO media (id, post_id, kind, mime, path, size, sha256, created_at) VALUES (?,?,'image','image/png',?,?,?,?)").run(id, id, `alice/p${id}.png`, png.length, sha, now);
+}
+const id10 = mediaIdentity({ id: 10, sha256: sha, path: 'alice/p10.png', created_at: now });
+const out10 = `_thumbs/${`m${id10}`.slice(-2).padStart(2, '0')}/m${id10}_480.webp`;
+fs.mkdirSync(path.dirname(path.join(media, out10)), { recursive: true });
+fs.symlinkSync(victim, path.join(media, `${out10}.${process.pid}.tmp`));
+// A tiny time budget: the call answers with part of the work and says how
+// much is left.
+process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS = '1';
+const part = await call('POST', 'cache/rebuild', { dryRun: false });
+expect('tiny budget: partial rebuild with remaining', part.status === 200 && part.stoppedEarly === true && part.stopReason === 'time' && part.remaining > 0 && part.made < extra && part.missing === part.remaining);
+delete process.env.EGRAM_DEDUPE_REBUILD_BUDGET_MS;
+let left = part.remaining;
+for (let i = 0; i < 5 && left > 0; i++) left = (await call('POST', 'cache/rebuild', { dryRun: false })).remaining;
+expect('repeated rebuilds finish', left === 0);
+const out10St = fs.lstatSync(path.join(media, out10));
+expect('symlink at the old temp name not followed', fs.readFileSync(victim, 'utf8') === 'victim' && out10St.isFile() && !out10St.isSymbolicLink());
+expect('no temp files left by rebuild', !execList().split('\n').some((f) => /\.webp\.\d+-[0-9a-f]{16}\.tmp$/.test(f)));
+const fin = await call('POST', 'cache/clean', { dryRun: false });
+expect('clean reports stoppedEarly false when it ran to the end', fin.stoppedEarly === false && fin.stopReason === null);
 // The token file is read on every request: a rotated token works at once,
 // the old one stops, and a removed file closes the routes.
 const NEW = 'n'.repeat(40);
-fs.writeFileSync(process.env.GRABBIT_DEDUPE_TOKEN_FILE!, NEW);
+fs.writeFileSync(tokenFile, NEW);
 expect('rotated token works at once', (await call('GET', 'cache', undefined, NEW)).status !== 401);
 expect('old token refused at once', (await call('GET', 'cache', undefined, TOK)).status === 401);
-fs.unlinkSync(process.env.GRABBIT_DEDUPE_TOKEN_FILE!);
+fs.unlinkSync(tokenFile);
 expect('missing token file fails closed', (await call('GET', 'cache', undefined, NEW)).status === 401);
+fs.rmdirSync(tokenDir);
+expect('inherited GRABBIT_DEDUPE_TOKEN_FILE untouched', inheritedTokenFile === null || snapshot(inheritedTokenFile) === inheritedBefore);
+if (inheritedTokenFile) console.log(`inherited token file ${inheritedTokenFile}: ${inheritedBefore}`);
 function execList() { const out: string[] = []; const walk = (d: string) => { for (const f of fs.readdirSync(d, { withFileTypes: true })) { if (f.isDirectory()) walk(path.join(d, f.name)); else out.push(path.relative(media, path.join(d, f.name))); } }; walk(path.join(media, '_thumbs')); return out.sort().join('\n'); }
 srv.close();
 if (failed) {
